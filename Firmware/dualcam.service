@@ -1,0 +1,34 @@
+[Unit]
+Description=Dual Camera Recorder (Picamera2)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+NotifyAccess=main
+
+# Run as the user that should own the output files.
+User=pi
+Group=pi
+
+# Where relative paths (like recordings/...) are created.
+WorkingDirectory=/opt/dualcam
+
+# Use system python (execute unbuffered)
+ExecStart=/usr/bin/python3 -u /opt/dualcam/dual_cam_jp2.py
+
+# Clean shutdown on stop (SIGTERM); your script handles SIGTERM now.
+KillSignal=SIGTERM
+TimeoutStopSec=20
+
+# Restart if it crashes (optional but recommended)
+Restart=on-failure
+RestartSec=2
+
+# Logging goes to journal (default); explicitly included for clarity
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
