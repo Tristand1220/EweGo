@@ -51,6 +51,7 @@ try:
     # from picamera2.encoders import H264Encoder
     # from picamera2.outputs import FileOutput
     from picamera2.encoders import JpegEncoder
+    from picamera2.encoders import MJPEGEncoder
     from picamera2.outputs import FileOutput
 except ImportError:
     print("picamera2 not installed. Install with: sudo apt install python3-picamera2")
@@ -145,8 +146,8 @@ class MinimalRecorder:
         # Camera 1
         self.cam1 = Picamera2(0)
         config1 = self.cam1.create_video_configuration(
-            main={"size": (1920, 1080), "format": "RGB888"},
-            controls={"FrameRate": 30},
+            main={"size": (2304, 1296), "format": "YUV420"},
+            controls={"FrameRate": 10},
             buffer_count=16,
         )
         self.cam1.configure(config1)
@@ -154,8 +155,8 @@ class MinimalRecorder:
         # Camera 2
         self.cam2 = Picamera2(1)
         config2 = self.cam2.create_video_configuration(
-            main={"size": (1920, 1080), "format": "RGB888"},
-            controls={"FrameRate": 30},
+            main={"size": (1920, 1080), "format": "YUV420"},
+            controls={"FrameRate": 10},
             buffer_count=16,
         )
         self.cam2.configure(config2)
@@ -175,8 +176,8 @@ class MinimalRecorder:
         )
 
         # Create encoders
-        enc1 = JpegEncoder()
-        enc2 = JpegEncoder()
+        enc1 = MJPEGEncoder()
+        enc2 = MJPEGEncoder()
 
         # Start cameras
         self.cam1.start()
@@ -204,7 +205,7 @@ class MinimalRecorder:
     def print_stats(self):
         """Print statistics every period and update systemd status if present."""
         while self.running:
-            time.sleep(10)
+            time.sleep(1)
 
             stats1 = self.out1.get_stats() if self.out1 else None
             stats2 = self.out2.get_stats() if self.out2 else None
