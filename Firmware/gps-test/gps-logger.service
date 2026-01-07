@@ -1,0 +1,37 @@
+[Unit]
+Description=GPS Data Logger with Time Synchronization
+Documentation=https://github.com/yourusername/gps-logger
+After=network-online.target time-sync.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/gps
+
+# Use virtual environment python
+ExecStart=/home/pi/gps_env/bin/python /opt/gps/gps_logger.py
+
+# Restart on failure
+Restart=on-failure
+RestartSec=10
+StartLimitInterval=200
+StartLimitBurst=5
+
+# Set nice level (0 = normal priority)
+Nice=0
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gps-logger
+
+# Security settings (optional - can be tightened further)
+# PrivateTmp=yes
+# NoNewPrivileges=true
+# ProtectSystem=strict
+# ReadWritePaths=/opt/gps/data
+
+[Install]
+WantedBy=multi-user.target
