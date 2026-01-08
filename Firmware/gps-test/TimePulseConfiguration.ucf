@@ -1,0 +1,70 @@
+{
+	"type": "CFG-ITEM",
+	"items": [
+		{
+			"key": "0x40050026",
+			"value": 0,
+			"layer": 0,
+			"action": "Set",
+			"valueType": "U4",
+			"requestId": "acc6fd31-a86b-4ff1-9d29-6c234f7e9941"
+		},
+		{
+			"key": "0x40050026",
+			"value": 0,
+			"layer": 2,
+			"action": "Set",
+			"valueType": "U4",
+			"requestId": "c70c205d-1138-47c5-90aa-e6c6d935436c"
+		},
+		{
+			"key": "0x4005000d",
+			"value": 0,
+			"layer": 0,
+			"action": "Set",
+			"valueType": "U4",
+			"requestId": "91222854-fbaf-4225-b8a7-491ec26b2cf3"
+		},
+		{
+			"key": "0x4005000d",
+			"value": 0,
+			"layer": 2,
+			"action": "Set",
+			"valueType": "U4",
+			"requestId": "d639e2a0-a729-4fbf-bb6c-55ad23a7412b"
+		},
+		{
+			"key": "0x4005000f",
+			"value": 0,
+			"layer": 0,
+			"action": "Set",
+			"valueType": "U4",
+			"requestId": "f4a4277f-07a2-4400-9459-2f3987e9368e"
+		},
+		{
+			"key": "0x4005000f",
+			"value": 0,
+			"layer": 2,
+			"action": "Set",
+			"valueType": "U4",
+			"requestId": "12f93fa5-0785-4f26-b7bd-7ae75ce8cc26"
+		},
+		{
+			"key": "0x20050017",
+			"value": 1,
+			"layer": 0,
+			"action": "Set",
+			"valueType": "E1",
+			"requestId": "dacc072d-d14d-4bf5-8a67-7eb7bb1e6669"
+		},
+		{
+			"key": "0x20050017",
+			"value": 1,
+			"layer": 2,
+			"action": "Set",
+			"valueType": "E1",
+			"requestId": "13e12de8-7b3b-42d1-bd60-bf228f1a0afd"
+		}
+	],
+	"description": ""
+}

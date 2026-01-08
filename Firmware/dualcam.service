@@ -14,7 +14,7 @@ Group=pi
 # Where relative paths (like recordings/...) are created.
 WorkingDirectory=/opt/dualcam
 
-# Use system python (execute unbuffered)
+# Use system python
 ExecStart=/usr/bin/python3 -u /opt/dualcam/dual_cam_jp2.py
 
 # Clean shutdown on stop (SIGTERM); your script handles SIGTERM now.
