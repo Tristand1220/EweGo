@@ -1,0 +1,4 @@
+[submodule "Hardware/uSAW"]
+	path = Hardware/eweSAW
+	url = https://github.com/ckemere/ucm4.git
+	branch = uSAW
