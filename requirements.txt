@@ -1,0 +1,5 @@
+# picamera2 is installed system-wide via apt (depends on libcamera)
+# opencv-python may also come from system apt (python3-opencv)
+opencv-python>=4.13.0.92
+pyserial>=3.5
+pyubx2>=1.2.59
