@@ -138,8 +138,8 @@ class GPSLogger:
         self.ntrip = None
         
         # Logging
-        # log_dir = "." # Useful for debugging
-        log_dir = "/opt/gps/data"
+        log_dir = "./logs" # Useful for debugging
+        # log_dir = "/opt/gps/data"
         os.makedirs(log_dir, exist_ok=True)  # Create directory if it doesn't exist
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
