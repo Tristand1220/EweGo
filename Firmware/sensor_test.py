@@ -14,6 +14,7 @@ import subprocess
 import signal
 import sys
 import time
+import os
 from pathlib import Path
 from datetime import datetime
 import threading
@@ -48,7 +49,7 @@ class BatteryLifeTest:
         sys.exit(0)
 
     def start_imu_logger(self, max_retries=3):
-        """Start IMU data logger with retries (UART can race with camera init)"""
+        """Start IMU data logger with retries (backup to IMU's internal retry)"""
         print("Starting IMU logger...")
 
         imu_script = FIRMWARE_DIR / "IMU" / "log_imu_data.py"
@@ -60,7 +61,26 @@ class BatteryLifeTest:
             "--rate", "50"
         ]
 
+        def kill_stale_port_users():
+            """Kill any process holding the IMU serial port from a previous run."""
+            try:
+                result = subprocess.run(
+                    ["fuser", "/dev/ttyAMA5"],
+                    capture_output=True, text=True, timeout=5
+                )
+                if result.stdout.strip():
+                    pids = result.stdout.strip().split()
+                    for pid in pids:
+                        pid = pid.strip()
+                        if pid.isdigit():
+                            print(f"  Killing stale process {pid} on /dev/ttyAMA5")
+                            os.kill(int(pid), signal.SIGKILL)
+                    time.sleep(0.5)
+            except Exception:
+                pass
+
         def launch():
+            kill_stale_port_users()
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -85,7 +105,9 @@ class BatteryLifeTest:
                         continue
                     if any(kw in line for kw in [
                         "============", "BNO055", "initialized", "Logging to:",
-                        "WARNING", "Failed", "Shutting down", "Logged", "samples to"
+                        "WARNING", "Failed", "Error", "Shutting down", "Logged",
+                        "samples to", "Init failed", "retrying", "attempt", "Traceback",
+                        "Exception", "Permission"
                     ]):
                         print(f"[IMU] {line}")
 
@@ -95,8 +117,14 @@ class BatteryLifeTest:
                     return
                 retries_left = max_retries - attempt - 1
                 if retries_left > 0:
-                    print(f"[IMU] Crashed (exit {rc}), retrying in 2s ({retries_left} left)...")
-                    time.sleep(2)
+                    # Kill any zombie that might still hold the serial port
+                    try:
+                        proc.kill()
+                        proc.wait(timeout=2)
+                    except Exception:
+                        pass
+                    print(f"[IMU] Crashed (exit {rc}), retrying in 3s ({retries_left} left)...")
+                    time.sleep(3)
                     proc = launch()
                 else:
                     print(f"[IMU] Crashed (exit {rc}), no retries left")
@@ -247,13 +275,15 @@ finally:
         self.running = True
 
         try:
-            self.start_imu_logger()
-            time.sleep(1)
+            # Start cameras first — they take longest to initialize and
+            # their init interferes with the IMU's UART.
+            self.start_camera_recorder()
+            time.sleep(3)  # Wait for camera init to finish
 
             self.start_audio_recorder()
             time.sleep(1)
 
-            self.start_camera_recorder()
+            self.start_imu_logger()
             time.sleep(1)
 
             self.start_fuel_gauge_logger()

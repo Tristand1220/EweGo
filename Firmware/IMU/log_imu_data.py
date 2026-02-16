@@ -460,10 +460,23 @@ class IMULogger:
         print("Press Ctrl+C to stop")
         print("=" * 60)
 
-        # Initialize sensor
-        if not self.sensor.open():
-            print("Failed to initialize sensor. Exiting.")
-            return 1
+        # Initialize sensor (retry up to 10 times — BNO055 UART is flaky
+        # on startup, especially when other peripherals are initializing)
+        for init_attempt in range(10):
+            if self.sensor.open():
+                break
+            if init_attempt < 9:
+                wait = 2
+                print(f"Init failed, retrying in {wait}s ({9 - init_attempt} left)...")
+                time.sleep(wait)
+                # Close and reopen serial port for a clean retry
+                try:
+                    self.sensor.close()
+                except Exception:
+                    pass
+            else:
+                print("Failed to initialize sensor after 10 attempts. Exiting.")
+                return 1
 
         # Create log file
         log_filename = self._create_log_file()
