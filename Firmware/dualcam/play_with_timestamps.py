@@ -14,25 +14,47 @@ import numpy as np
 
 
 def load_timestamps(timestamp_file):
-    """Load timestamps from binary file (64-bit little-endian unsigned integers in microseconds)."""
-    timestamps = []
+    """Load timestamps from binary file (64-bit little-endian integers in microseconds).
+
+    Detects and repairs timestamp wraparounds from long recordings where the
+    camera's STC counter reset to 0 mid-recording.
+    """
+    raw = []
     with open(timestamp_file, 'rb') as f:
         while True:
             data = f.read(8)
             if not data:
                 break
-            ts = struct.unpack('<Q', data)[0]
-            timestamps.append(ts)
-    return timestamps
+            raw.append(struct.unpack('<q', data)[0])
+
+    # Strip trailing zeros (unused pre-allocated buffer entries)
+    while raw and raw[-1] == 0:
+        raw.pop()
+
+    # Repair wraparounds: if a timestamp jumps backwards by > 1 second,
+    # the camera's STC counter wrapped. Accumulate an offset so all
+    # subsequent timestamps stay monotonic.
+    wrap_offset = 0
+    for i in range(1, len(raw)):
+        adjusted = raw[i] + wrap_offset
+        prev = raw[i - 1]
+        if adjusted < prev - 1_000_000:
+            gap = prev - adjusted
+            wrap_offset += gap
+            adjusted += gap
+            print(f"  Repaired timestamp wrap at frame {i} (shifted +{gap / 1e6:.1f}s)")
+        raw[i] = adjusted
+
+    return raw
 
 
-def find_video_file(camera_num):
+def find_video_file(camera_num, directory='.'):
     """Find the video file for a camera, preferring H.264 over MJPEG.
 
     Returns (path, format) where format is 'h264' or 'mjpeg'.
     """
-    h264_path = f'camera{camera_num}.h264'
-    mjpeg_path = f'camera{camera_num}.mjpeg'
+    h264_path = os.path.join(directory, f'camera{camera_num}.h264')
+    mjpeg_path = os.path.join(directory, f'camera{camera_num}.mjpeg')
 
     if os.path.exists(h264_path):
         return h264_path, 'h264'
@@ -42,8 +64,18 @@ def find_video_file(camera_num):
         return None, None
 
 
-def play_video(mjpeg_file, timestamps):
-    """Play MJPEG video with proper timing based on timestamps."""
+def find_audio_file(directory):
+    """Find an audio WAV file in a recording directory.
+
+    Returns the path to the first audio_*.wav found, or None.
+    """
+    import glob
+    matches = sorted(glob.glob(os.path.join(directory, 'audio_*.wav')))
+    return matches[0] if matches else None
+
+
+def play_video(mjpeg_file, timestamps, flip=True):
+    """Play video with proper timing based on timestamps."""
     cap = cv2.VideoCapture(mjpeg_file)
 
     if not cap.isOpened():
@@ -65,6 +97,10 @@ def play_video(mjpeg_file, timestamps):
             ret, frame = cap.read()
             if not ret or frame_idx >= len(timestamps):
                 break
+
+            # Rotate 180° if sensors are mounted upside down
+            if flip:
+                frame = cv2.rotate(frame, cv2.ROTATE_180)
 
             # Show frame
             cv2.imshow('Video Player', frame)
@@ -165,7 +201,7 @@ def build_sync_map(timestamps1, timestamps2):
 
 
 def play_dual_video(video_file1, timestamps1, fmt1,
-                     video_file2, timestamps2, fmt2):
+                     video_file2, timestamps2, fmt2, flip=True, swap=True):
     """Play two videos side-by-side with timestamp-synchronized playback."""
 
     # Remux to seekable container files (cached, near-instant after first run)
@@ -277,13 +313,18 @@ def play_dual_video(video_file1, timestamps1, fmt1,
         f1 = last_frame1
         f2 = last_frame2
 
+        # Rotate 180° if sensors are mounted upside down
+        if flip:
+            f1 = cv2.rotate(f1, cv2.ROTATE_180)
+            f2 = cv2.rotate(f2, cv2.ROTATE_180)
+
         fh1, fw1 = f1.shape[:2]
         fh2, fw2 = f2.shape[:2]
         if fh1 != fh2:
             f1 = cv2.resize(f1, (int(fw1 * s1), target_height))
             f2 = cv2.resize(f2, (int(fw2 * s2), target_height))
 
-        combined = np.hstack((f1, f2))
+        combined = np.hstack((f2, f1)) if swap else np.hstack((f1, f2))
 
         # Overlay — show time relative to start of recording
         t0 = timestamps1[0]
@@ -346,6 +387,104 @@ def play_dual_video(video_file1, timestamps1, fmt1,
     cv2.destroyAllWindows()
 
 
+def export_dual_video(video_file1, timestamps1, fmt1,
+                      video_file2, timestamps2, fmt2,
+                      output_file, flip=True, swap=True, audio_file=None):
+    """Export dual side-by-side video to MP4 with timestamp overlay and optional audio.
+
+    Uses a single ffmpeg filter_complex command — no Python frame loop.
+    ffmpeg handles decode, flip, stack, overlay, audio mux, and encode natively.
+    """
+
+    print(f"Preparing camera 1 ({video_file1}, {fmt1})...")
+    avi1, n1 = ensure_seekable(video_file1, timestamps1, fmt1)
+    print(f"Preparing camera 2 ({video_file2}, {fmt2})...")
+    avi2, n2 = ensure_seekable(video_file2, timestamps2, fmt2)
+
+    if not avi1 or not avi2:
+        print("Error: Could not prepare video files")
+        return
+
+    timestamps1 = timestamps1[:n1]
+    timestamps2 = timestamps2[:n2]
+
+    # Compute camera time offset (cam2 relative to cam1)
+    offset_sec = (timestamps2[0] - timestamps1[0]) / 1e6
+    duration_sec = (timestamps1[-1] - timestamps1[0]) / 1e6
+    total_frames = len(timestamps1)
+    avg_fps = total_frames / duration_sec
+
+    print(f"Exporting to {output_file}")
+    print(f"  Duration: {duration_sec:.1f}s @ {avg_fps:.1f}fps")
+    print(f"  Camera offset: {offset_sec*1000:.1f}ms")
+    if audio_file:
+        print(f"  Audio: {audio_file}")
+
+    # Build filter: flip both cameras (180°), then stack side-by-side, then overlay time
+    # vflip+hflip = 180° rotation without interpolation (fast)
+    if flip:
+        f1_filter = "[0:v]vflip,hflip[v1]"
+        f2_filter = "[1:v]vflip,hflip[v2]"
+    else:
+        f1_filter = "[0:v]null[v1]"
+        f2_filter = "[1:v]null[v2]"
+
+    # swap: cam2 on left, cam1 on right (default)
+    if swap:
+        stack = "[v2][v1]hstack=inputs=2[vid]"
+    else:
+        stack = "[v1][v2]hstack=inputs=2[vid]"
+
+    # drawtext with PTS-based timestamp (matches actual video time)
+    drawtext = (
+        "[vid]drawtext=text='Time\\: %{pts\\:hms}'"
+        ":x=10:y=10:fontsize=24:fontcolor=green"
+        ":borderw=1:bordercolor=black[out]"
+    )
+
+    filter_complex = f"{f1_filter};{f2_filter};{stack};{drawtext}"
+
+    # Build ffmpeg command
+    ffmpeg_cmd = ['ffmpeg', '-y']
+
+    # Input 0: camera 1
+    ffmpeg_cmd += ['-i', avi1]
+
+    # Input 1: camera 2, offset to align with camera 1
+    if abs(offset_sec) > 0.001:
+        ffmpeg_cmd += ['-itsoffset', f'{offset_sec:.6f}']
+    ffmpeg_cmd += ['-i', avi2]
+
+    # Input 2: audio (if present)
+    if audio_file:
+        ffmpeg_cmd += ['-i', audio_file]
+
+    ffmpeg_cmd += ['-filter_complex', filter_complex]
+    ffmpeg_cmd += ['-map', '[out]']
+
+    if audio_file:
+        ffmpeg_cmd += ['-map', '2:a']
+
+    ffmpeg_cmd += [
+        '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
+        '-pix_fmt', 'yuv420p',
+    ]
+    if audio_file:
+        ffmpeg_cmd += ['-c:a', 'aac', '-b:a', '192k', '-shortest']
+    ffmpeg_cmd.append(output_file)
+
+    print(f"  Running ffmpeg...")
+    result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        print(f"  ffmpeg failed: {result.stderr[-500:]}")
+        return
+
+    # Report output file size
+    size_mb = os.path.getsize(output_file) / (1024 * 1024)
+    print(f"Export complete: {output_file} ({size_mb:.1f} MB)")
+
+
 def convert_to_mp4(mjpeg_file, timestamps, output_file):
     """Convert MJPEG to MP4 with proper timing."""
     cap = cv2.VideoCapture(mjpeg_file)
@@ -393,21 +532,41 @@ def convert_to_mp4(mjpeg_file, timestamps, output_file):
 def main():
     parser = argparse.ArgumentParser(description='Play or convert videos with timestamps (H.264 or MJPEG)')
     parser.add_argument('camera', type=str, nargs='?', help='Camera number (1 or 2), or omit for dual view')
+    parser.add_argument('--dir', type=str, help='Recording directory (contains camera/ subdir and audio WAV)')
     parser.add_argument('--dual', action='store_true', help='Play both cameras side-by-side (default if no camera specified)')
     parser.add_argument('--convert', action='store_true', help='Convert to MP4 instead of playing')
     parser.add_argument('--output', type=str, help='Output MP4 file (for conversion)')
+    parser.add_argument('--no-flip', action='store_true', help='Disable 180° rotation (sensors are mounted upside down by default)')
+    parser.add_argument('--no-swap', action='store_true', help='Disable left/right camera swap (cameras are swapped by default)')
+    parser.add_argument('--no-audio', action='store_true', help='Skip audio muxing in export')
+    parser.add_argument('--export', nargs='?', const=True, metavar='FILE',
+                        help='Export dual side-by-side video to MP4 (default: dual_export.mp4 in recording dir)')
 
     args = parser.parse_args()
+
+    # Resolve directories
+    if args.dir:
+        rec_dir = os.path.abspath(args.dir)
+        cam_dir = os.path.join(rec_dir, 'camera')
+        if not os.path.isdir(cam_dir):
+            print(f"Error: No camera/ subdirectory in {rec_dir}")
+            sys.exit(1)
+    else:
+        rec_dir = None
+        cam_dir = '.'
+
+    flip = not args.no_flip
+    swap = not args.no_swap
 
     # Determine if dual mode
     dual_mode = args.dual or args.camera is None
 
     if dual_mode and not args.convert:
         # Play both cameras synchronized — auto-detect format
-        video1, fmt1 = find_video_file(1)
-        video2, fmt2 = find_video_file(2)
-        timestamp_file1 = 'camera1_timestamps.bin'
-        timestamp_file2 = 'camera2_timestamps.bin'
+        video1, fmt1 = find_video_file(1, cam_dir)
+        video2, fmt2 = find_video_file(2, cam_dir)
+        timestamp_file1 = os.path.join(cam_dir, 'camera1_timestamps.bin')
+        timestamp_file2 = os.path.join(cam_dir, 'camera2_timestamps.bin')
 
         for label, path in [('Camera 1 video', video1), ('Camera 2 video', video2),
                             ('Camera 1 timestamps', timestamp_file1),
@@ -421,7 +580,30 @@ def main():
         timestamps1 = load_timestamps(timestamp_file1)
         timestamps2 = load_timestamps(timestamp_file2)
 
-        play_dual_video(video1, timestamps1, fmt1, video2, timestamps2, fmt2)
+        if args.export:
+            # Determine output path
+            if args.export is True:
+                # Default filename, put in recording dir or cwd
+                out_dir = rec_dir or '.'
+                output_file = os.path.join(out_dir, 'dual_export.mp4')
+            else:
+                output_file = args.export
+
+            # Find audio file
+            audio_file = None
+            if not args.no_audio and rec_dir:
+                audio_file = find_audio_file(rec_dir)
+                if audio_file:
+                    print(f"Found audio: {audio_file}")
+                else:
+                    print("No audio file found, exporting video only")
+
+            export_dual_video(video1, timestamps1, fmt1, video2, timestamps2, fmt2,
+                              output_file=output_file, flip=flip, swap=swap,
+                              audio_file=audio_file)
+        else:
+            play_dual_video(video1, timestamps1, fmt1, video2, timestamps2, fmt2,
+                            flip=flip, swap=swap)
 
     else:
         # Single camera mode
@@ -430,8 +612,8 @@ def main():
             sys.exit(1)
 
         # Auto-detect video format
-        video_file, fmt = find_video_file(args.camera)
-        timestamp_file = f'camera{args.camera}_timestamps.bin'
+        video_file, fmt = find_video_file(args.camera, cam_dir)
+        timestamp_file = os.path.join(cam_dir, f'camera{args.camera}_timestamps.bin')
 
         if video_file is None:
             print(f"Error: No video file found for camera {args.camera} (.h264 or .mjpeg)")
@@ -450,7 +632,7 @@ def main():
             output_file = args.output or f'camera{args.camera}_timestamped.mp4'
             convert_to_mp4(video_file, timestamps, output_file)
         else:
-            play_video(video_file, timestamps)
+            play_video(video_file, timestamps, flip=flip)
 
 
 if __name__ == '__main__':
