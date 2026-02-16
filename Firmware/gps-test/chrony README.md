@@ -163,13 +163,6 @@ sudo systemctl restart chrony
 chronyc sources -v
 
 ```
-Expected output after GPS gets fix:
-MS Name/IP address         Stratum Poll Reach LastRx Last sample
-===============================================================================
-#* GPS                           0   2   377     6   -123ns[  -89ns] +/-  234us
-#+ PPS                           0   1   377     5    +45ns[  +67ns] +/-  156ns
-^? 0.debian.pool.ntp.org        2   6   377    23  +1234us[+1289us] +/- 45ms
-^? 1.debian.pool.ntp.org        2   6   377    25  +2345us[+2401us] +/- 67ms
 
 ### Step 2: Check Chrony Sources
 
