@@ -2,7 +2,7 @@
 
 ## Overview
 `dual_cam_jp2.py` is a minimal dual-camera recording program for Raspberry Pi using **Picamera2**.
-It captures frames from two CSI cameras simultaneously, writes MJPEG video streams, and logs raw per-frame timestamps to binary files for precise timing analysis.
+It captures frames from two CSI cameras simultaneously, writes H.264 video streams using the hardware GPU encoder, and logs raw per-frame timestamps to binary files for precise timing analysis.
 
 Each time the program starts, it creates a **new recording session directory**.
 
@@ -13,13 +13,13 @@ On each start, a new directory is created:
 
 ```
 recordings/YYYYMMDD_HHMMSS/
-├── camera1.mjpeg
+├── camera1.h264
 ├── camera1_timestamps.bin
-├── camera2.mjpeg
+├── camera2.h264
 └── camera2_timestamps.bin
 ```
 
-Timestamp files contain raw little-endian int64 timestamps (nanoseconds).
+Timestamp files contain epoch-aligned little-endian int64 timestamps (microseconds from system monotonic clock). Both cameras share the same time base for synchronization.
 
 ---
 
@@ -116,4 +116,38 @@ This shows camera initialization messages and periodic frame timing statistics.
 ## Notes
 - The program runs non-interactively when started as a service.
 - Stop recording with `systemctl stop`; files are closed cleanly.
-- CPU load will be visible in `top` while recording is active.
+- Uses hardware H.264 encoder at 12 Mbps per camera (minimal CPU load).
+- Both cameras run at 1920x1080 @ 24fps (max stutter-free rate on CM4's shared encoder block).
+
+---
+
+## play_with_timestamps.py
+
+Video player for recordings with timestamp-based synchronization.
+
+### Features
+- **Auto-detects format**: looks for `.h264` files first, falls back to `.mjpeg` (legacy)
+- **Dual camera sync**: builds a frame-pairing map from timestamps so both cameras stay aligned, even with start-time offset or clock drift
+- **Seekable playback**: remuxes raw streams to seekable containers (`.mp4` for H.264, `.avi` for MJPEG) via ffmpeg on first run, then caches the result
+- **Controls**: SPACE=play/pause, q/ESC=quit, LEFT/a=back 10 frames, RIGHT/d=forward 10 frames, trackbar for seeking
+
+### Usage
+
+Run from the directory containing the camera files:
+
+```bash
+# Dual side-by-side view (default)
+cd sensor_test_YYYYMMDD_HHMMSS/camera/
+python play_with_timestamps.py
+
+# Single camera
+python play_with_timestamps.py 1
+
+# Convert to MP4
+python play_with_timestamps.py 1 --convert
+python play_with_timestamps.py 1 --convert --output custom_name.mp4
+```
+
+### Requirements
+- `opencv-python` and `numpy` (installed via requirements.txt)
+- `ffmpeg` (installed via apt)

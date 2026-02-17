@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 MAX17048 Fuel Gauge Test Script
-For Raspberry Pi - I2C Bus 3 (SDA/SCL on GPIO pins 2/3)
+For Raspberry Pi - I2C Bus 1 (SDA/SCL on GPIO pins 2/3)
 """
 
 import smbus2
@@ -446,8 +446,8 @@ def main():
     """Main test program"""
     # Parse command-line arguments
     parser = argparse.ArgumentParser(description='MAX17048 Fuel Gauge Test Program')
-    parser.add_argument('--bus', type=int, default=3,
-                        help='I2C bus number (default: 3)')
+    parser.add_argument('--bus', type=int, default=1,
+                        help='I2C bus number (default: 1)')
     args = parser.parse_args()
 
     print("\n" + "=" * 60)
