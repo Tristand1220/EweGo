@@ -1,3 +1,10 @@
+# Sensor test recordings (large video/audio data)
+sensor_test_*/
+recordings/
+
+# KiCad lock files
+*.lck
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]

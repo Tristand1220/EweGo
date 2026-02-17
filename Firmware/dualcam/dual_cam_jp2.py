@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 Minimal dual camera recorder with RAW timestamp logging to disk
-Writes timestamps as raw float64 binary data directly to disk
+Writes timestamps as raw int64 binary data directly to disk
+
+Uses hardware H.264 encoder to offload CPU and avoid timestamp gaps
+caused by CPU-intensive MJPEG encoding + SD card I/O stalls.
 """
 
 import time
@@ -48,10 +51,7 @@ def systemd_set_status(status: str) -> None:
 
 try:
     from picamera2 import Picamera2
-    # from picamera2.encoders import H264Encoder
-    # from picamera2.outputs import FileOutput
-    from picamera2.encoders import JpegEncoder
-    from picamera2.encoders import MJPEGEncoder
+    from picamera2.encoders import H264Encoder
     from picamera2.outputs import FileOutput
 except ImportError:
     print("picamera2 not installed. Install with: sudo apt install python3-picamera2")
@@ -67,33 +67,60 @@ class RawTimestampOutput(FileOutput):
     def __init__(self, video_file, timestamp_file, camera_id):
         super().__init__(video_file)
         self.camera_id = camera_id
-        self.ts_file = open(timestamp_file, "wb")  # Binary write
+        self.ts_file = open(timestamp_file, "wb", buffering=0)  # Unbuffered binary write
         self.last_ts = None
         self.count = 0
+        self.epoch_offset = None  # Set on first frame
+        self.last_raw_ts = None   # Track raw camera timestamp for wraparound detection
+        self.wrap_offset = 0      # Accumulated offset from timestamp wraparounds
 
-        # Stats tracking
+        # Stats tracking (guarded by _lock)
+        self._lock = threading.Lock()
         self.intervals = []
         self.interval_sum = 0
         self.interval_min = float("inf")
         self.interval_max = 0
 
     def outputframe(self, frame, keyframe=True, timestamp=None, packet=None, audio=None):
-        # Convert to seconds (float64) for interval computation
-        ts = timestamp / 1e6 if timestamp else 0.0
+        raw_ts = timestamp or 0
 
-        # Write raw timestamp to disk immediately (8 bytes, little-endian int64)
-        self.ts_file.write(struct.pack("<q", timestamp))
+        # Detect timestamp wraparound: camera STC counter can reset to 0
+        # after extended recording (~3 hours). When the raw timestamp jumps
+        # backwards by more than 1 second, accumulate the previous value
+        # so aligned timestamps stay monotonic.
+        if self.last_raw_ts is not None and raw_ts < self.last_raw_ts - 1_000_000:
+            self.wrap_offset += self.last_raw_ts
+            print(f"CAM{self.camera_id}: timestamp wrap detected at frame {self.count}, "
+                  f"adding {self.last_raw_ts / 1e6:.1f}s offset")
+        self.last_raw_ts = raw_ts
+
+        corrected_ts = raw_ts + self.wrap_offset
+
+        # On first frame, record the mapping from camera-relative timestamp
+        # to system monotonic clock so we can align cameras later.
+        if self.epoch_offset is None:
+            sys_us = time.monotonic_ns() // 1000
+            self.epoch_offset = sys_us - corrected_ts
+
+        # Convert to seconds (float64) for interval computation
+        ts = corrected_ts / 1e6
+
+        # Write epoch-aligned timestamp (corrected camera ts + offset) so both
+        # cameras share the same time base.
+        aligned_ts = corrected_ts + self.epoch_offset
+        self.ts_file.write(struct.pack("<q", aligned_ts))
         self.count += 1
 
         # Calculate interval for stats
         if self.last_ts is not None:
             interval = (ts - self.last_ts) * 1000  # ms
-            self.intervals.append(interval)
-            self.interval_sum += interval
-            if interval < self.interval_min:
-                self.interval_min = interval
-            if interval > self.interval_max:
-                self.interval_max = interval
+            with self._lock:
+                self.intervals.append(interval)
+                self.interval_sum += interval
+                if interval < self.interval_min:
+                    self.interval_min = interval
+                if interval > self.interval_max:
+                    self.interval_max = interval
 
         self.last_ts = ts
 
@@ -102,23 +129,24 @@ class RawTimestampOutput(FileOutput):
 
     def get_stats(self):
         """Get current statistics and reset tracking"""
-        if not self.intervals:
-            return None
+        with self._lock:
+            if not self.intervals:
+                return None
 
-        stats = {
-            "count": self.count,
-            "avg": self.interval_sum / len(self.intervals),
-            "min": self.interval_min,
-            "max": self.interval_max,
-        }
+            stats = {
+                "count": self.count,
+                "avg": self.interval_sum / len(self.intervals),
+                "min": self.interval_min,
+                "max": self.interval_max,
+            }
 
-        # Reset interval tracking (keep count)
-        self.intervals = []
-        self.interval_sum = 0
-        self.interval_min = float("inf")
-        self.interval_max = 0
+            # Reset interval tracking (keep count)
+            self.intervals = []
+            self.interval_sum = 0
+            self.interval_min = float("inf")
+            self.interval_max = 0
 
-        return stats
+            return stats
 
     def close(self):
         """Close timestamp file"""
@@ -146,9 +174,9 @@ class MinimalRecorder:
         # Camera 1
         self.cam1 = Picamera2(0)
         config1 = self.cam1.create_video_configuration(
-            main={"size": (2304, 1296), "format": "YUV420"},
-            controls={"FrameRate": 10},
-            buffer_count=16,
+            main={"size": (1920, 1080), "format": "YUV420"},
+            controls={"FrameRate": 24},
+            buffer_count=32,
         )
         self.cam1.configure(config1)
 
@@ -156,8 +184,8 @@ class MinimalRecorder:
         self.cam2 = Picamera2(1)
         config2 = self.cam2.create_video_configuration(
             main={"size": (1920, 1080), "format": "YUV420"},
-            controls={"FrameRate": 10},
-            buffer_count=16,
+            controls={"FrameRate": 24},
+            buffer_count=32,
         )
         self.cam2.configure(config2)
 
@@ -165,19 +193,19 @@ class MinimalRecorder:
 
         # Create outputs with raw timestamp files
         self.out1 = RawTimestampOutput(
-            str(self.dir / "camera1.mjpeg"),
+            str(self.dir / "camera1.h264"),
             str(self.dir / "camera1_timestamps.bin"),
             camera_id=1,
         )
         self.out2 = RawTimestampOutput(
-            str(self.dir / "camera2.mjpeg"),
+            str(self.dir / "camera2.h264"),
             str(self.dir / "camera2_timestamps.bin"),
             camera_id=2,
         )
 
-        # Create encoders
-        enc1 = MJPEGEncoder()
-        enc2 = MJPEGEncoder()
+        # Create H.264 encoders (hardware GPU — offloads CPU entirely)
+        enc1 = H264Encoder(bitrate=12_000_000)
+        enc2 = H264Encoder(bitrate=12_000_000)
 
         # Start cameras
         self.cam1.start()
@@ -192,8 +220,9 @@ class MinimalRecorder:
         self.running = True
         print(f"Recording to: {self.dir}")
         print("Timestamps: camera1_timestamps.bin, camera2_timestamps.bin")
-        print("Format: Raw binary float64 (8 bytes per timestamp)")
-        print("Expected interval: 33.33ms @ 30fps\n")
+        print("Format: Raw binary int64 (8 bytes per timestamp)")
+        print("Encoder: H.264 hardware (12 Mbps per camera)")
+        print("Expected interval: 41.67ms @ 24fps\n")
 
         # Update systemd service status (optional; requires Type=notify)
         systemd_set_status(f"Recording to {self.dir}")

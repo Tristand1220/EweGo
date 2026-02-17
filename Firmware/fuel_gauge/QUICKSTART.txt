@@ -1,0 +1,66 @@
+═══════════════════════════════════════════════════════════════
+MAX17048 FUEL GAUGE TESTING - QUICK START GUIDE
+═══════════════════════════════════════════════════════════════
+
+Hardware: Raspberry Pi
+I2C Bus:  3
+Pins:     GPIO 2 (SDA), GPIO 3 (SCL)
+Address:  0x36
+
+═══════════════════════════════════════════════════════════════
+SETUP STEPS
+═══════════════════════════════════════════════════════════════
+
+1. Enable I2C (if not already enabled):
+   sudo raspi-config
+   Navigate to: Interface Options -> I2C -> Enable
+   Reboot if prompted
+
+2. Detect the MAX17048:
+   python3 detect_max17048.py
+
+3. Run the test program:
+   python3 max17048_test.py --bus 3
+   (or use the bus number reported by detect script)
+
+═══════════════════════════════════════════════════════════════
+FILES INCLUDED
+═══════════════════════════════════════════════════════════════
+
+max17048_test.py    - Main test program with interactive menu
+detect_max17048.py  - Scans I2C buses to find the MAX17048
+requirements.txt    - Python dependencies (smbus2)
+README.md           - Detailed documentation
+QUICKSTART.txt      - This file
+
+═══════════════════════════════════════════════════════════════
+TEST FEATURES
+═══════════════════════════════════════════════════════════════
+
+The test program provides:
+✓ Read battery voltage (VCELL)
+✓ Read state of charge (SOC %)
+✓ Read IC version
+✓ Continuous monitoring mode
+✓ Alert threshold configuration and testing
+✓ Quick-start command (recalibrate fuel gauge)
+✓ Device reset
+✓ Interactive menu for all tests
+
+═══════════════════════════════════════════════════════════════
+TROUBLESHOOTING
+═══════════════════════════════════════════════════════════════
+
+If device not found:
+• Check physical connections (SDA/SCL on GPIO pins 2/3)
+• Verify power supply to MAX17048
+• Check I2C pull-up resistors (4.7kΩ typical)
+• Ensure I2C is enabled: ls /dev/i2c-3
+• Check i2cdetect: sudo i2cdetect -y 3
+
+Permission errors:
+• Add user to i2c group: sudo usermod -a -G i2c $USER
+• Logout and login again
+• Or run with sudo: sudo python3 max17048_test.py
+
+═══════════════════════════════════════════════════════════════
