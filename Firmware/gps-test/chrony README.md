@@ -94,7 +94,7 @@ sudo nano /etc/default/gpsd
 Add the following settings:
 ```bash
 # Devices gpsd should collect to at boot time
-DEVICES="/dev/serial0 /dev/pps0"
+DEVICES="/dev/ttyACM0 /dev/pps0" #Change to your port
 
 # Options for gpsd
 GPSD_OPTIONS="-n"
