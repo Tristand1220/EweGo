@@ -27,6 +27,10 @@ from datetime import datetime
 import threading
 import json
 
+# trim session imports
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from trim_session import trim_session
+
 
 # Resolve paths relative to this script's location (Firmware/)
 FIRMWARE_DIR = Path(__file__).resolve().parent
@@ -72,7 +76,8 @@ class BatteryLifeTest:
         
     # Synchronization helpers
     def _write_sync_manifest(self):
-        """Captures shared reference epoch nefore any sensor subprocess starts
+        """
+           Captures shared reference epoch before any sensor subprocess starts
            All  t0 values will be stored relative to this epoch so that post-hoc alignment is a simple subtraction
         """
         epoch_ns = time.time_ns()
@@ -144,6 +149,14 @@ class BatteryLifeTest:
             time.sleep(.25)
         print(f"[SYNC] WARNING: {sensor_name} did not report t0 within {timeout}s")
         return False
+    
+    def trim_data(self,sensor_name, data_file):
+        """Trim data files to realtive epoch start times"""
+        if not self.manifest_path.exists():
+            print("[TRIM] No manifest found, cannot trim data streams")
+            return
+        
+        
 
     def start_imu_logger(self, max_retries=3):
         """Start IMU data logger with retries (backup to IMU's internal retry)"""
@@ -477,6 +490,15 @@ finally:
         print("  - Camera: " + str(self.log_dir / "camera/"))
         print("  - Fuel gauge: " + str(self.log_dir / f"fuel_gauge_{self.session}.csv"))
         print("=" * 70)
+        
+        # Trim all data streams to a common start time
+        print("\nStarting post-session data trimming...")
+        try:
+            trim_session(self.log_dir)
+        except Exception as e:
+            print(f"[TRIM] ERROR during trimming: {e}")
+            import traceback
+            traceback.print_exc()
         
     def _print_sync_summary(self):
         """Print readable sync alignment summary from the manifest."""
