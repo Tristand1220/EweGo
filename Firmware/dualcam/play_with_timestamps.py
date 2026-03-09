@@ -9,6 +9,7 @@ import sys
 import os
 import argparse
 import subprocess
+import threading
 import cv2
 import numpy as np
 
@@ -153,7 +154,7 @@ def ensure_seekable(video_file, timestamps, fmt='mjpeg'):
         return out_path, n
 
     n = len(timestamps)
-    duration_sec = timestamps[-1] / 1e6
+    duration_sec = (timestamps[-1] - timestamps[0]) / 1e6
     fps = n / duration_sec
 
     print(f"  Remuxing {video_file} -> {out_path} (ffmpeg -c copy, ~instant)...")
@@ -387,6 +388,45 @@ def play_dual_video(video_file1, timestamps1, fmt1,
     cv2.destroyAllWindows()
 
 
+def run_ffmpeg_with_progress(cmd, duration_sec):
+    """Run ffmpeg showing a real-time progress bar. Returns (returncode, stderr_text).
+
+    Uses -progress pipe:1 so ffmpeg writes structured progress to stdout.
+    Stderr is collected in a background thread to prevent buffer deadlock.
+    """
+    full_cmd = cmd + ['-progress', 'pipe:1', '-nostats']
+    proc = subprocess.Popen(full_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+
+    stderr_buf = []
+    def _drain_stderr():
+        for line in proc.stderr:
+            stderr_buf.append(line)
+    t = threading.Thread(target=_drain_stderr, daemon=True)
+    t.start()
+
+    bar_width = 40
+    out_time_us = 0
+    for line in proc.stdout:
+        line = line.strip()
+        if line.startswith('out_time_us='):
+            try:
+                out_time_us = int(line.split('=', 1)[1])
+            except ValueError:
+                pass
+        elif line.startswith('progress='):
+            pct = min(100.0, out_time_us / (duration_sec * 1e6) * 100) if duration_sec > 0 else 0
+            elapsed = out_time_us / 1e6
+            filled = int(bar_width * pct / 100)
+            bar = '#' * filled + '-' * (bar_width - filled)
+            sys.stdout.write(f'\r  [{bar}] {pct:5.1f}%  {elapsed:.0f}s / {duration_sec:.0f}s  ')
+            sys.stdout.flush()
+
+    proc.wait()
+    t.join()
+    sys.stdout.write('\n')
+    return proc.returncode, ''.join(stderr_buf)
+
+
 def export_dual_video(video_file1, timestamps1, fmt1,
                       video_file2, timestamps2, fmt2,
                       output_file, flip=True, swap=True, audio_file=None):
@@ -474,10 +514,10 @@ def export_dual_video(video_file1, timestamps1, fmt1,
     ffmpeg_cmd.append(output_file)
 
     print(f"  Running ffmpeg...")
-    result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+    returncode, stderr = run_ffmpeg_with_progress(ffmpeg_cmd, duration_sec)
 
-    if result.returncode != 0:
-        print(f"  ffmpeg failed: {result.stderr[-500:]}")
+    if returncode != 0:
+        print(f"  ffmpeg failed: {stderr[-500:]}")
         return
 
     # Report output file size
