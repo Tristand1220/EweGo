@@ -23,7 +23,7 @@ import sys
 import time
 import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import threading
 import json
 
@@ -277,6 +277,8 @@ class BatteryLifeTest:
             "-c",
             f"""
 import sys
+import time
+import json
 sys.path.insert(0, '{FIRMWARE_DIR / "dualcam"}')
 
 import dual_cam_jp2

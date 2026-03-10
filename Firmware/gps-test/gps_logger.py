@@ -473,7 +473,7 @@ def main():
     
     # Serial port configuration
     # SERIAL_PORT = '/dev/tty.usbserial-110'       # MacOS Debugging
-    SERIAL_PORT = '/dev/ttyAMA4'                   # Raspberry Pi UART4 (needs dtoverlay=uart4)
+    SERIAL_PORT = '/dev/ttyACM0'                   # Raspberry Pi UART4 (needs dtoverlay=uart4)
     BAUDRATE = 460800
     
     # NTRIP configuration (set to None to disable)
