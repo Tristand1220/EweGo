@@ -14,6 +14,7 @@ import subprocess
 import sys
 import wave
 from pathlib import Path
+from datetime import datetime, timezone
 
 def trim_session(log_dir:Path) -> bool:
   """Trim alls ensor data files to a common start time
@@ -86,7 +87,7 @@ def trim_session(log_dir:Path) -> bool:
     
   # Trimming each sensor file from manifest
   if "imu"  in reported_start_times:
-    ok = _trim_imu(log_dir, session, latest_t0_ns, reported_start_times["imu"]["t0_ns"],trimmed_dir)
+    ok = _trim_imu(log_dir,latest_t0_ns,trimmed_dir)
     all_ok = all_ok and ok
     
   # Trimming each sensor file from manifest
@@ -165,7 +166,7 @@ def _trim_audio(log_dir: Path, session:str, latest_t0_ns: int, audio_t0_ns: int,
 def _trim_imu(log_dir: Path, latest_t0_ns: int, trimmed_dir: Path) -> bool:
   """Drop all IMU csv rows whose timestamp is before the latest t0 time
   """
-  imu_dir = log_dir / "imu"
+  imu_dir = log_dir / "imu/logs"
   csv_files = sorted(imu_dir.glob("*.csv"))
 
   if not csv_files:
@@ -190,10 +191,11 @@ def _trim_imu(log_dir: Path, latest_t0_ns: int, trimmed_dir: Path) -> bool:
           shutil.copy2(src, dst)
           continue
         
+        latest_t0_dt = datetime.fromtimestamp(latest_t0_ns / 1e9)
         rows = [row for row in reader
-                if int(row["timestamp"]) >= latest_t0_ns]
+                if datetime.fromisoformat(row["timestamp"]) >= latest_t0_dt]
         
-        with open(dst, "w", newlines="") as f:
+        with open(dst, "w", newline="") as f:
           writer = csv.DictWriter(f, fieldnames=fieldnames)
           writer.writeheader()
           writer.writerows(rows)
