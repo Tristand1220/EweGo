@@ -251,10 +251,12 @@ class BatteryLifeTest:
         sidecar_path = self.log_dir / SIDECAR["audio"]
         audio_script = FIRMWARE_DIR / "audio" / "record_audio.py"
         
+        # Edit made - define device to record (only way I can record an audio file from pi)
         cmd = [
             sys.executable,
             str(audio_script),
             "--output", str(audio_file),
+            "--device", "hw:2,0",
             "--t0-sidecar", str(sidecar_path),
         ]
         proc = subprocess.Popen(
