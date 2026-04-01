@@ -125,7 +125,7 @@ class NTRIPClient:
 class GPSLogger:
     """Main GPS logger class with time synchronization"""
     
-    def __init__(self, serial_port, baudrate=230400, ntrip_config=None):
+    def __init__(self, serial_port, baudrate=230400, ntrip_config=None, log_dir=None):
         self.serial_port = serial_port
         self.baudrate = baudrate
         self.ntrip_config = ntrip_config
@@ -138,9 +138,8 @@ class GPSLogger:
         self.ntrip = None
         
         # Logging
-        log_dir = "./logs" # Useful for debugging
-        # log_dir = "/opt/gps/data"
-        os.makedirs(log_dir, exist_ok=True)  # Create directory if it doesn't exist
+        log_dir = log_dir or "./logs"
+        os.makedirs(log_dir, exist_ok=True)
         
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.log_filename_base = os.path.join(log_dir, f"gps_log_{timestamp}")
@@ -466,15 +465,16 @@ class GPSLogger:
 
 def main():
     """Main entry point"""
-    
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--port', default='/dev/ttyAMA4')
+    parser.add_argument('--baud', type=int, default=460800)
+    parser.add_argument('--log-dir', default=None)
+    args = parser.parse_args()
+
     # ========== CONFIGURATION ==========
-    # This logger runs as a systemd service at /opt/gps/gps_logger.py
-    # Logs are saved to /opt/gps/data/
-    
-    # Serial port configuration
-    # SERIAL_PORT = '/dev/tty.usbserial-110'       # MacOS Debugging
-    SERIAL_PORT = '/dev/ttyACM0'                   # Raspberry Pi UART4 (needs dtoverlay=uart4)
-    BAUDRATE = 460800
+    SERIAL_PORT = args.port
+    BAUDRATE = args.baud
     
     # NTRIP configuration (set to None to disable)
     # NTRIP_CONFIG = None  # Disabled by default
@@ -494,7 +494,8 @@ def main():
     logger = GPSLogger(
         serial_port=SERIAL_PORT,
         baudrate=BAUDRATE,
-        ntrip_config=NTRIP_CONFIG
+        ntrip_config=NTRIP_CONFIG,
+        log_dir=args.log_dir
     )
     
     # Start logging

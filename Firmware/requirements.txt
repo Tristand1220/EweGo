@@ -1,0 +1,6 @@
+# Firmware-only dependencies for Pi deployment.
+# opencv/numpy are excluded — only needed for the dev-side player script.
+# smbus2 is excluded — installed via apt (python3-smbus2).
+# picamera2 is excluded — installed via apt (depends on libcamera).
+pyserial>=3.5
+pyubx2>=1.2.59

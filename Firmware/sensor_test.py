@@ -57,12 +57,7 @@ class BatteryLifeTest:
         # Create subdirectories for organized logging
         (self.log_dir / "imu").mkdir(exist_ok=True)
         (self.log_dir / "camera").mkdir(exist_ok=True)
-        
-        # Path to shared manifest
-        self.manifest_path = self.log_dir / "sync_manifest.json"
-        
-        # Sync-pulse thread handling
-        self._sync_thread = None
+        (self.log_dir / "gps").mkdir(exist_ok=True)
 
         # Setup signal handlers
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -387,7 +382,41 @@ finally:
                     print(f"[FUEL] {line}")
         threading.Thread(target=monitor, daemon=True).start()
 
-    def start_all(self):
+    def start_gps_logger(self):
+        """Start GPS logger"""
+        print("Starting GPS logger...")
+
+        gps_log_dir = self.log_dir / "gps"
+        gps_script = FIRMWARE_DIR / "gps-test" / "gps_logger.py"
+        cmd = [
+            sys.executable,
+            str(gps_script),
+            "--port", "/dev/ttyAMA4",
+            "--baud", "460800",
+            "--log-dir", str(gps_log_dir),
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        self.processes['gps'] = proc
+        print(f"  PID: {proc.pid}")
+        print(f"  Logging to: {gps_log_dir}")
+
+        def monitor():
+            for line in proc.stdout:
+                line = line.rstrip()
+                if any(kw in line for kw in [
+                    "Connected", "Logging", "Fix:", "NTRIP", "error",
+                    "failed", "stopped", "Statistics"
+                ]):
+                    print(f"[GPS] {line}")
+        threading.Thread(target=monitor, daemon=True).start()
+
+    def start_all(self, enable_gps=True):
         """Start all processes"""
         print("=" * 70)
         print("SENSOR TEST - UNIFIED DATA LOGGER")
@@ -425,6 +454,10 @@ finally:
                 self._collect_sensor_t0(sensor)
                 
            
+
+            if enable_gps:
+                self.start_gps_logger()
+                time.sleep(1)
 
             print()
             print("=" * 70)
@@ -493,6 +526,8 @@ finally:
         print("  - Audio: " + str(self.log_dir / f"audio_{self.session}.wav"))
         print("  - Camera: " + str(self.log_dir / "camera/"))
         print("  - Fuel gauge: " + str(self.log_dir / f"fuel_gauge_{self.session}.csv"))
+        if 'gps' in self.processes:
+            print("  - GPS: " + str(self.log_dir / "gps/"))
         print("=" * 70)
         
         # Trim all data streams to a common start time
@@ -531,10 +566,15 @@ finally:
 
 def main():
     """Main entry point"""
+    import argparse
+    parser = argparse.ArgumentParser(description="EweGo unified sensor logger")
+    parser.add_argument('--no-gps', action='store_true', help='Disable GPS logger (if GPS not installed)')
+    args = parser.parse_args()
+
     test = BatteryLifeTest()
 
     try:
-        return test.start_all()
+        return test.start_all(enable_gps=not args.no_gps)
     except KeyboardInterrupt:
         print("\n\nInterrupt received...")
         test.stop_all()
