@@ -227,17 +227,26 @@ def _trim_camera(log_dir: Path, session:str, latest_t0_ns: int, camera_t0_ns: in
   
   all_ok = True
   for src in video_files:
-    dst =out_camera_dir / src.name
+    is_h264 = src.suffix.lower() == ".h264"
+    dst = out_camera_dir / (src.stem + ".mp4") #Changing output to be mp4
     try:
       # Using ffmepg to trim audio with "seeking" method
       cmd = [
         "ffmpeg",
         "-y",
+      ]
+      
+      if is_h264:
+        cmd += ["-framerate", "24"] # Specifying framerate
+        
+      cmd += [
         "-ss", f"{trim_sec:.6f}", # start time of new video starting after t0
         "-i", str(src),
         "-c", "copy", # skip re-encode, just copy the frames
+        "-an",
         str(dst)
       ]
+      
       result = subprocess.run(cmd, capture_output=True, text=True)
       if result.returncode != 0:
         print(f"  [TRIM CAMERA] ERROR (ffmpeg): {result.stderr[-300:]}")
