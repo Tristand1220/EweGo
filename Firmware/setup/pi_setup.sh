@@ -101,48 +101,114 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 5. WiFi configuration via NetworkManager
+# 5. Hostname configuration
 # --------------------------------------------------------------------------
-# Write an nmconnection file directly rather than relying on the Pi imager's
+# EweGo devices use the naming convention ewe1, ewe2, ewe3, ...
+# The device number determines the mesh network IP: eweN → 10.0.0.N
+CURRENT_HOSTNAME=$(hostname)
+if [[ "$CURRENT_HOSTNAME" =~ ^ewe([0-9]+)$ ]]; then
+    DEVICE_NUM="${BASH_REMATCH[1]}"
+    info "Hostname: $CURRENT_HOSTNAME (device #$DEVICE_NUM)"
+else
+    echo ""
+    info "Hostname configuration"
+    echo "  Current hostname: $CURRENT_HOSTNAME"
+    echo "  EweGo devices use the naming convention: ewe1, ewe2, ewe3, ..."
+    echo "  The device number determines the mesh IP: eweN → 10.0.0.N"
+    echo ""
+    read -r -p "  Device number (1-254): " DEVICE_NUM
+
+    if ! [[ "$DEVICE_NUM" =~ ^[0-9]+$ ]] || [ "$DEVICE_NUM" -lt 1 ] || [ "$DEVICE_NUM" -gt 254 ]; then
+        error "Invalid device number: $DEVICE_NUM (must be 1-254)"
+        exit 1
+    fi
+
+    NEW_HOSTNAME="ewe${DEVICE_NUM}"
+    info "Setting hostname to $NEW_HOSTNAME..."
+    sudo hostnamectl set-hostname "$NEW_HOSTNAME"
+    info "Hostname set (fully active after reboot)"
+fi
+
+# --------------------------------------------------------------------------
+# 6. WiFi configuration via NetworkManager
+# --------------------------------------------------------------------------
+# Write nmconnection files directly rather than relying on the Pi imager's
 # first-boot auto-config, which writes to /etc/netplan/ and is prone to
 # truncation/corruption if the Pi resets before that write completes.
 NM_CONN_DIR="/etc/NetworkManager/system-connections"
+
+# Clean up empty/corrupt netplan files left by first-boot auto-config
+if [ -d /etc/netplan ]; then
+    for f in /etc/netplan/90-NM-*.yaml; do
+        [ -f "$f" ] || continue
+        if [ ! -s "$f" ]; then
+            info "Removing empty netplan file: $f"
+            sudo rm -f "$f"
+        fi
+    done
+fi
+
+# --- 6a. Mesh WiFi (primary — devices auto-connect to each other) ---
+NM_MESH_FILE="$NM_CONN_DIR/ewego-mesh.nmconnection"
+MESH_IP="10.0.0.${DEVICE_NUM}"
+
+if sudo test -f "$NM_MESH_FILE"; then
+    info "Mesh connection already configured ($NM_MESH_FILE)"
+else
+    info "Configuring mesh WiFi (IP: $MESH_IP)..."
+    sudo tee "$NM_MESH_FILE" > /dev/null <<EOF
+[connection]
+id=ewego-mesh
+type=wifi
+interface-name=wlan0
+autoconnect=yes
+autoconnect-priority=10
+
+[wifi]
+mode=mesh
+band=bg
+channel=6
+ssid=ewego-mesh
+
+[ipv4]
+method=manual
+address1=${MESH_IP}/24
+
+[ipv6]
+method=link-local
+EOF
+    sudo chmod 600 "$NM_MESH_FILE"
+    info "Mesh WiFi configured: SSID=ewego-mesh, IP=$MESH_IP"
+fi
+
+# --- 6b. Infrastructure WiFi (optional fallback — for lab/internet access) ---
 NM_CONN_FILE="$NM_CONN_DIR/ewego-wifi.nmconnection"
 
 if sudo test -f "$NM_CONN_FILE"; then
-    info "WiFi connection already configured ($NM_CONN_FILE)"
+    info "Infrastructure WiFi already configured ($NM_CONN_FILE)"
 else
     echo ""
-    info "WiFi configuration"
-    echo "  Enter the WiFi SSID and password for this Pi to connect to."
-    echo "  Leave password blank for an open network."
+    info "Infrastructure WiFi (optional — for lab/internet access)"
+    echo "  This is a fallback connection with lower priority than mesh."
+    echo "  Leave SSID blank to skip."
     echo ""
     read -r -p "  WiFi SSID: " WIFI_SSID
     read -r -s -p "  WiFi password (blank=open): " WIFI_PASSWORD
     echo ""
 
     if [ -z "$WIFI_SSID" ]; then
-        warn "No SSID entered — skipping WiFi configuration"
-        warn "Run manually: sudo nmcli dev wifi connect <SSID> [password <PASS>]"
+        warn "No SSID entered — skipping infrastructure WiFi"
+        warn "Mesh networking is still configured. To add WiFi later:"
+        warn "  sudo nmcli dev wifi connect <SSID> [password <PASS>]"
     else
-        # Clean up empty/corrupt netplan files left by first-boot auto-config
-        if [ -d /etc/netplan ]; then
-            for f in /etc/netplan/90-NM-*.yaml; do
-                [ -f "$f" ] || continue
-                if [ ! -s "$f" ]; then
-                    info "Removing empty netplan file: $f"
-                    sudo rm -f "$f"
-                fi
-            done
-        fi
-
-        # Write NetworkManager keyfile
+        # Write NetworkManager keyfile (low priority so mesh is preferred)
         if [ -z "$WIFI_PASSWORD" ]; then
             sudo tee "$NM_CONN_FILE" > /dev/null <<EOF
 [connection]
 id=ewego-wifi
 type=wifi
 autoconnect=yes
+autoconnect-priority=-1
 
 [wifi]
 mode=infrastructure
@@ -161,6 +227,7 @@ EOF
 id=ewego-wifi
 type=wifi
 autoconnect=yes
+autoconnect-priority=-1
 
 [wifi]
 mode=infrastructure
@@ -180,13 +247,14 @@ addr-gen-mode=stable-privacy
 EOF
         fi
         sudo chmod 600 "$NM_CONN_FILE"
-        sudo nmcli connection reload
-        info "WiFi configured for SSID: $WIFI_SSID"
+        info "Infrastructure WiFi configured for SSID: $WIFI_SSID (low priority)"
     fi
 fi
 
+sudo nmcli connection reload
+
 # --------------------------------------------------------------------------
-# 7. /boot/firmware/config.txt
+# 7. /boot/firmware/config.txt (hardware overlays)
 # --------------------------------------------------------------------------
 CONFIG="/boot/firmware/config.txt"
 info "Configuring $CONFIG..."
@@ -242,11 +310,22 @@ echo " Setup Complete"
 echo "============================================================================"
 echo ""
 echo " What was configured:"
+echo "   - Hostname: ewe${DEVICE_NUM}"
+echo "   - Mesh WiFi: SSID=ewego-mesh, IP=${MESH_IP}/24, channel 6 (2.4 GHz)"
 echo "   - python3-picamera2, i2c-tools, python3-smbus2 installed via apt"
-echo "   - uv + Python venv with opencv, pyserial, pyubx2"
+echo "   - uv + Python venv with pyserial, pyubx2"
 echo "   - i2c-dev kernel module set to load on boot"
-echo "   - WiFi connection written to /etc/NetworkManager/system-connections/"
 echo "   - config.txt: disable-bt, dual cameras, audio hat, GPS, IMU, fuel gauge"
+echo ""
+echo " Mesh networking:"
+echo "   This device: ewe${DEVICE_NUM} → ${MESH_IP}"
+echo "   All devices on the mesh use 10.0.0.N (where N = device number)"
+echo "   Verify after reboot:"
+echo "     iw dev wlan0 info              # Should show: type mesh point"
+echo "     iw dev wlan0 station dump      # List mesh peers"
+echo "     ping 10.0.0.<other>            # Ping another device"
+echo "   Join from laptop:"
+echo "     bash Firmware/setup/mesh_join.sh join 100"
 echo ""
 echo " Hardware pin assignments:"
 echo "   GPIO 2/3   - I2C bus 1 (fuel gauge MAX17048 @ 0x36)"
@@ -257,12 +336,7 @@ echo "   GPIO 14/15 - Debug console (ttyAMA0, 115200 baud) — Bluetooth disable
 echo "   CAM0/CAM1  - Dual IMX708 cameras"
 echo ""
 echo " To test after reboot:"
-echo "   cd ~/EweGo && source .venv/bin/activate"
-echo "   python Firmware/sensor_test.py          # Run all sensors"
-echo "   python Firmware/dualcam/dual_cam_jp2.py # Camera only"
-echo "   python Firmware/IMU/log_imu_data.py     # IMU only"
-echo "   python Firmware/fuel_gauge/max17048_test.py  # Fuel gauge only"
-echo "   sudo i2cdetect -y 1                     # Verify I2C bus"
+echo "   cd ~/EweGo && uv run python Firmware/sensor_test.py"
 echo ""
 echo " *** REBOOT REQUIRED for config.txt changes ***"
 echo "   Run: sudo reboot"

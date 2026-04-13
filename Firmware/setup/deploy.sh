@@ -8,9 +8,10 @@
 #   bash deploy.sh <hostname-or-ip> [user]
 #
 # Examples:
-#   bash deploy.sh pi4.local
-#   bash deploy.sh pi4.local william
-#   bash deploy.sh 192.168.1.42 pi
+#   bash deploy.sh ewe1.local               # Over mesh (mDNS)
+#   bash deploy.sh ewe1.local william        # With explicit user
+#   bash deploy.sh 10.0.0.1 william          # Over mesh (direct IP)
+#   bash deploy.sh 192.168.1.42 pi           # Over infrastructure WiFi
 # ============================================================================
 
 set -euo pipefail

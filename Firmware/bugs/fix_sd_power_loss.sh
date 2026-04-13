@@ -112,18 +112,69 @@ for f in "$NETPLAN_DIR"/*.yaml; do
     rm -v "$f"
 done
 
+# --- Derive device number from hostname ---
+echo ""
+HOSTNAME_FILE="$ROOTFS/etc/hostname"
+PI_HOSTNAME=""
+DEVICE_NUM=""
+
+if [ -f "$HOSTNAME_FILE" ]; then
+    PI_HOSTNAME=$(cat "$HOSTNAME_FILE" | tr -d '[:space:]')
+    info "Device hostname: $PI_HOSTNAME"
+fi
+
+if [[ "$PI_HOSTNAME" =~ ^ewe([0-9]+)$ ]]; then
+    DEVICE_NUM="${BASH_REMATCH[1]}"
+    info "Device number: $DEVICE_NUM (from hostname)"
+else
+    read -r -p "  Device number for mesh IP 10.0.0.X (1-254): " DEVICE_NUM
+    if ! [[ "$DEVICE_NUM" =~ ^[0-9]+$ ]] || [ "$DEVICE_NUM" -lt 1 ] || [ "$DEVICE_NUM" -gt 254 ]; then
+        warn "Invalid device number — skipping mesh profile"
+        DEVICE_NUM=""
+    fi
+fi
+
 # --- Write NM connection keyfiles directly (bypasses netplan) ---
 echo ""
 info "Writing NetworkManager connection profiles..."
 
 mkdir -p "$NM_CONN_DIR"
 
-# Wifi connection
-cat > "$NM_CONN_DIR/Willphone.nmconnection" << EOF
+# Mesh connection (primary — devices auto-connect to each other)
+if [ -n "$DEVICE_NUM" ]; then
+    MESH_IP="10.0.0.${DEVICE_NUM}"
+    cat > "$NM_CONN_DIR/ewego-mesh.nmconnection" << EOF
 [connection]
-id=$SSID
+id=ewego-mesh
 type=wifi
-autoconnect=true
+interface-name=wlan0
+autoconnect=yes
+autoconnect-priority=10
+
+[wifi]
+mode=mesh
+band=bg
+channel=6
+ssid=ewego-mesh
+
+[ipv4]
+method=manual
+address1=${MESH_IP}/24
+
+[ipv6]
+method=link-local
+EOF
+    chmod 600 "$NM_CONN_DIR/ewego-mesh.nmconnection"
+    info "Written: ewego-mesh.nmconnection (mesh, IP=$MESH_IP)"
+fi
+
+# Infrastructure wifi connection (low priority fallback)
+cat > "$NM_CONN_DIR/ewego-wifi.nmconnection" << EOF
+[connection]
+id=ewego-wifi
+type=wifi
+autoconnect=yes
+autoconnect-priority=-1
 
 [wifi]
 mode=infrastructure
@@ -139,8 +190,8 @@ method=auto
 [ipv6]
 method=auto
 EOF
-chmod 600 "$NM_CONN_DIR/Willphone.nmconnection"
-info "Written: Willphone.nmconnection (wifi)"
+chmod 600 "$NM_CONN_DIR/ewego-wifi.nmconnection"
+info "Written: ewego-wifi.nmconnection (infrastructure, SSID=$SSID)"
 
 # Wired connection
 cat > "$NM_CONN_DIR/Wired.nmconnection" << 'EOF'
@@ -167,14 +218,21 @@ echo "==========================================================================
 echo ""
 echo "  What was done:"
 echo "    - Removed corrupted netplan files"
-echo "    - Wrote NM wifi profile for '$SSID' (bypasses netplan)"
+if [ -n "$DEVICE_NUM" ]; then
+echo "    - Wrote NM mesh profile (ewego-mesh, IP=10.0.0.${DEVICE_NUM})"
+fi
+echo "    - Wrote NM wifi profile for '$SSID' (low priority fallback)"
 echo "    - Wrote NM wired profile for eth0"
 echo ""
 echo "  Next steps:"
 echo "    1. Safely eject the SD card"
 echo "    2. Insert into the Pi and power on"
-echo "    3. Wait ~30 seconds for wifi to connect"
-echo "    4. Try: ssh user@pi4.local"
+echo "    3. Wait ~30 seconds for mesh/wifi to connect"
+if [ -n "$DEVICE_NUM" ]; then
+echo "    4. From mesh: ssh user@ewe${DEVICE_NUM}.local (or 10.0.0.${DEVICE_NUM})"
+else
+echo "    4. Try: ssh user@<hostname>.local"
+fi
 echo ""
 echo "  If it still doesn't work:"
 echo "    - Connect a monitor + keyboard to see boot output"
