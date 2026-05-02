@@ -1,0 +1,87 @@
+# EweGo - Sheep Monitoring System
+
+## Project Overview
+Battery-powered sensor platform on a Raspberry Pi CM4 for monitoring sheep.
+Records dual cameras, IMU, audio, GPS, and battery level simultaneously.
+
+## Repository Structure
+```
+EweGo/
+├── Firmware/           # All Pi-side code
+│   ├── dualcam/        # Dual camera recorder + player
+│   ├── IMU/            # BNO055 IMU logger (UART5)
+│   ├── audio/          # Audio recorder (Google AIY Voice Hat)
+│   ├── fuel_gauge/     # MAX17048 battery monitor (I2C bus 1)
+│   ├── gps-test/       # u-blox ZED-X20P GPS (UART3 + UART4)
+│   ├── setup/          # Pi setup script (pi_setup.sh)
+│   ├── bugs/           # Known bugs, fixes, and documentation
+│   └── sensor_test.py  # Unified orchestrator (runs all sensors)
+├── Hardware/           # KiCad PCB design (submodule: eweSAW)
+├── sensor_test_*/      # Recording output directories (gitignored)
+├── pyproject.toml      # Python deps (opencv, pyserial, pyubx2)
+└── requirements.txt    # Pip-compatible requirements
+```
+
+## Key Technical Details
+
+### Dual Camera Recorder (`Firmware/dualcam/dual_cam_jp2.py`)
+- Hardware H.264 encoder, 12 Mbps per camera, 1920x1080 @ 24fps
+- 24fps is the max stutter-free rate (CM4 has a single shared encoder block)
+- 30fps causes ~23% frame doubling; 20fps and 24fps have 0% drops
+- Timestamps: epoch-aligned via `time.monotonic_ns()` offset on first frame
+- Binary format: little-endian int64 (`<q`), microseconds
+- Has wraparound detection for camera STC counter resets in long recordings
+- Unbuffered writes (`buffering=0`) for timestamp persistence on power loss
+
+### Player (`Firmware/dualcam/play_with_timestamps.py`)
+- Auto-detects .h264 vs .mjpeg (legacy)
+- Remuxes to seekable containers via ffmpeg (cached)
+- `build_sync_map()` pairs cam1/cam2 frames by closest timestamp
+- Repairs timestamp wraparounds and strips trailing zero-padding on load
+- Run from recording dir: `uv run python /path/to/play_with_timestamps.py`
+
+### Sensor Test Orchestrator (`Firmware/sensor_test.py`)
+- Launches all sensors as subprocesses with monitoring threads
+- Uses `FIRMWARE_DIR = Path(__file__).resolve().parent` for portable paths
+- IMU has retry logic (max_retries=3) for UART startup race conditions
+- Camera subprocess monkey-patches MinimalRecorder to redirect output dir
+
+### Pi Environment
+- picamera2 installed via apt (not pip/uv — python-prctl build fails)
+- uv venv with `--system-site-packages` to access apt picamera2
+- `/boot/firmware/config.txt` overlays: disable-bt, imx708 x2, googlevoicehat, uart3, uart4, uart5, i2c_arm
+- `disable-bt` frees the PL011 so debug console (GPIO 14/15) is stable; Bluetooth unused
+- `i2c-dev` kernel module for userspace I2C (fuel gauge on bus 1)
+- i2c3 overlay conflicts with i2c_arm on same GPIO 2/3 — don't use both
+- GPIO 4/5 = UART3 (GPS secondary), GPIO 8/9 = UART4 (GPS data), GPIO 12/13 = UART5 (IMU)
+
+### Mesh Networking
+- 802.11s mesh on the CM4's onboard WiFi (BCM43455/brcmfmac) — no router needed
+- Mesh SSID: `ewego-mesh`, channel 6 (2.4 GHz), open (no encryption)
+- Hostname convention: `eweN` (ewe1, ewe2, ...) → mesh IP `10.0.0.N/24`
+- Infrastructure WiFi kept as low-priority fallback (`autoconnect-priority=-1`)
+- Single radio: mesh and infrastructure WiFi are mutually exclusive on wlan0
+- Join from laptop: `bash Firmware/setup/mesh_join.sh join 100` → 10.0.0.100
+- Verify: `iw dev wlan0 info` (type mesh point), `iw dev wlan0 station dump` (peers)
+
+### Known Bugs
+- See `Firmware/bugs/` for documented issues and fix scripts
+- **Power loss / first-boot corruption**: Pi reset during first boot can truncate
+  netplan configs to 0 bytes, killing network. `pi_setup.sh` now writes WiFi
+  config directly to `/etc/NetworkManager/system-connections/` to avoid this.
+  Fix for existing broken installs: `Firmware/bugs/fix_sd_power_loss.sh`
+- **Timestamp wraparound**: Camera STC counter can reset to 0 in very long recordings
+  (~3+ hours). Recorder and player both handle this now.
+
+### Deployment
+- Deploy to Pi: `bash Firmware/setup/deploy.sh ewe1.local [user]`
+  - Rsyncs using `.rsyncignore` (excludes Hardware/, .venv/, __pycache__/, .git/, recordings/, CLAUDE.md)
+  - Prompts to run `pi_setup.sh` and reboot on the remote
+  - Works over mesh (`10.0.0.N`) or infrastructure WiFi
+- Run test: `cd ~/EweGo && uv run python Firmware/sensor_test.py`
+
+## User Preferences
+- Prefers concise communication
+- Wants explanations of *why* before implementing fixes
+- Uses uv for Python package management
+- Pi hostnames: ewe1.local, ewe2.local, ... (eweN convention)
