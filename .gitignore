@@ -1,6 +1,10 @@
 # Sensor test recordings (large video/audio data)
 sensor_test_*/
 recordings/
+Data/
+
+# Claude config files
+.claude/
 
 # KiCad lock files
 *.lck
