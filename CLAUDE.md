@@ -56,13 +56,16 @@ EweGo/
 - GPIO 4/5 = UART3 (GPS secondary), GPIO 8/9 = UART4 (GPS data), GPIO 12/13 = UART5 (IMU)
 
 ### Mesh Networking
-- 802.11s mesh on the CM4's onboard WiFi (BCM43455/brcmfmac) — no router needed
-- Mesh SSID: `ewego-mesh`, channel 6 (2.4 GHz), open (no encryption)
-- Hostname convention: `eweN` (ewe1, ewe2, ...) → mesh IP `10.0.0.N/24`
-- Infrastructure WiFi kept as low-priority fallback (`autoconnect-priority=-1`)
-- Single radio: mesh and infrastructure WiFi are mutually exclusive on wlan0
+- B.A.T.M.A.N. Advanced (batman-adv) over IBSS (ad-hoc) mode — no router needed
+- The CM4's BCM43455 does NOT support 802.11s; IBSS is the transport layer
+- IBSS SSID: `ewego-mesh`, channel 6 (2437 MHz), fixed cell ID `02:12:34:56:78:9A`
+- batman-adv kernel module creates virtual `bat0` interface for L2 mesh routing
+- Hostname convention: `eweN` (ewe1, ewe2, ...) → mesh IP `10.0.0.N/24` on bat0
+- Managed by systemd `ewego-mesh.service` (not NetworkManager)
+- NM ignores wlan0 via `/etc/NetworkManager/conf.d/ewego-unmanaged.conf`
+- Infrastructure WiFi not available (ad-hoc takes over wlan0; use USB adapter or ethernet)
 - Join from laptop: `bash Firmware/setup/mesh_join.sh join 100` → 10.0.0.100
-- Verify: `iw dev wlan0 info` (type mesh point), `iw dev wlan0 station dump` (peers)
+- Verify: `sudo batctl meshif bat0 n` (neighbors), `sudo batctl meshif bat0 o` (originators)
 
 ### Known Bugs
 - See `Firmware/bugs/` for documented issues and fix scripts

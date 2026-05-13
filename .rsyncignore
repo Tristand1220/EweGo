@@ -11,6 +11,9 @@ __pycache__/
 # Virtual environment (rebuilt on Pi via pi_setup.sh)
 .venv/
 
+# Experimental data (large files, lives on the Pi — no need to sync back)
+Data/
+
 # Recording output directories
 sensor_test_*/
 recordings/

@@ -60,7 +60,8 @@ sudo apt install -y --no-install-recommends \
     python3-picamera2 \
     python3-libcamera \
     i2c-tools \
-    python3-smbus2
+    python3-smbus2 \
+    batctl
 
 # --------------------------------------------------------------------------
 # 2. uv (Python package manager)
@@ -100,6 +101,14 @@ else
     info "i2c-dev already configured"
 fi
 
+# batman-adv kernel module (for mesh networking)
+if [ ! -f /etc/modules-load.d/batman-adv.conf ]; then
+    info "Enabling batman-adv module on boot..."
+    echo "batman-adv" | sudo tee /etc/modules-load.d/batman-adv.conf
+else
+    info "batman-adv already configured"
+fi
+
 # --------------------------------------------------------------------------
 # 5. Hostname configuration
 # --------------------------------------------------------------------------
@@ -130,12 +139,12 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 6. WiFi configuration via NetworkManager
+# 6. B.A.T.M.A.N. mesh networking
 # --------------------------------------------------------------------------
-# Write nmconnection files directly rather than relying on the Pi imager's
-# first-boot auto-config, which writes to /etc/netplan/ and is prone to
-# truncation/corruption if the Pi resets before that write completes.
-NM_CONN_DIR="/etc/NetworkManager/system-connections"
+# The CM4's BCM43455 does NOT support 802.11s mesh mode. Instead we use
+# IBSS (ad-hoc) mode as the transport layer with batman-adv for L2 mesh
+# routing. A systemd service manages the mesh (not NetworkManager).
+MESH_IP="10.0.0.${DEVICE_NUM}"
 
 # Clean up empty/corrupt netplan files left by first-boot auto-config
 if [ -d /etc/netplan ]; then
@@ -148,110 +157,88 @@ if [ -d /etc/netplan ]; then
     done
 fi
 
-# --- 6a. Mesh WiFi (primary — devices auto-connect to each other) ---
-NM_MESH_FILE="$NM_CONN_DIR/ewego-mesh.nmconnection"
+# Remove old 802.11s mesh profile if present (from previous setup attempts)
+sudo rm -f /etc/NetworkManager/system-connections/ewego-mesh.nmconnection
+
+# Tell NetworkManager to leave wlan0 alone (we manage it via systemd)
+NM_UNMANAGED="/etc/NetworkManager/conf.d/ewego-unmanaged.conf"
+if [ ! -f "$NM_UNMANAGED" ]; then
+    info "Configuring NetworkManager to ignore wlan0..."
+    sudo mkdir -p /etc/NetworkManager/conf.d
+    sudo tee "$NM_UNMANAGED" > /dev/null <<'EOF'
+[keyfile]
+unmanaged-devices=interface-name:wlan0
+EOF
+fi
+
+# --- 6a. Mesh startup script ---
+MESH_SCRIPT="/usr/local/bin/ewego-mesh-start.sh"
+info "Installing mesh startup script ($MESH_SCRIPT)..."
+sudo tee "$MESH_SCRIPT" > /dev/null <<'SCRIPT'
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Derive device number from hostname (eweN → N)
+HOSTNAME=$(hostname)
+if [[ "$HOSTNAME" =~ ^ewe([0-9]+)$ ]]; then
+    DEVICE_NUM="${BASH_REMATCH[1]}"
+else
+    echo "ERROR: hostname '$HOSTNAME' does not match eweN pattern"
+    exit 1
+fi
+
 MESH_IP="10.0.0.${DEVICE_NUM}"
+IFACE="wlan0"
+CELL="02:12:34:56:78:9A"   # Fixed IBSS cell ID — all nodes must match
 
-if sudo test -f "$NM_MESH_FILE"; then
-    info "Mesh connection already configured ($NM_MESH_FILE)"
-else
-    info "Configuring mesh WiFi (IP: $MESH_IP)..."
-    sudo tee "$NM_MESH_FILE" > /dev/null <<EOF
-[connection]
-id=ewego-mesh
-type=wifi
-interface-name=wlan0
-autoconnect=yes
-autoconnect-priority=10
+# Load batman-adv if not already loaded
+modprobe batman-adv 2>/dev/null || true
 
-[wifi]
-mode=mesh
-band=bg
-channel=6
-ssid=ewego-mesh
+# Set up IBSS (ad-hoc) mode on wlan0
+ip link set "$IFACE" down
+iw dev "$IFACE" set type ibss
+ip link set "$IFACE" up
 
-[ipv4]
-method=manual
-address1=${MESH_IP}/24
+# Join the IBSS cell (2437 MHz = channel 6, 2.4 GHz)
+iw dev "$IFACE" ibss join ewego-mesh 2437 HT20 fixed-freq "$CELL"
 
-[ipv6]
-method=link-local
+# Add wlan0 to batman mesh
+batctl meshif bat0 if add "$IFACE" 2>/dev/null || true
+
+# Bring up bat0 and assign static IP
+ip link set bat0 up
+ip addr flush dev bat0
+ip addr add "${MESH_IP}/24" dev bat0
+
+echo "Mesh active: bat0 = ${MESH_IP}/24 (IBSS + batman-adv)"
+SCRIPT
+sudo chmod 755 "$MESH_SCRIPT"
+
+# --- 6b. Systemd service ---
+MESH_SERVICE="/etc/systemd/system/ewego-mesh.service"
+info "Installing mesh systemd service ($MESH_SERVICE)..."
+sudo tee "$MESH_SERVICE" > /dev/null <<'EOF'
+[Unit]
+Description=EweGo B.A.T.M.A.N. Mesh Network
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/ewego-mesh-start.sh
+ExecStop=/usr/bin/ip link set bat0 down
+
+[Install]
+WantedBy=multi-user.target
 EOF
-    sudo chmod 600 "$NM_MESH_FILE"
-    info "Mesh WiFi configured: SSID=ewego-mesh, IP=$MESH_IP"
-fi
 
-# --- 6b. Infrastructure WiFi (optional fallback — for lab/internet access) ---
-NM_CONN_FILE="$NM_CONN_DIR/ewego-wifi.nmconnection"
+sudo systemctl daemon-reload
+sudo systemctl enable ewego-mesh.service
+info "Mesh service enabled (starts on boot)"
 
-if sudo test -f "$NM_CONN_FILE"; then
-    info "Infrastructure WiFi already configured ($NM_CONN_FILE)"
-else
-    echo ""
-    info "Infrastructure WiFi (optional — for lab/internet access)"
-    echo "  This is a fallback connection with lower priority than mesh."
-    echo "  Leave SSID blank to skip."
-    echo ""
-    read -r -p "  WiFi SSID: " WIFI_SSID
-    read -r -s -p "  WiFi password (blank=open): " WIFI_PASSWORD
-    echo ""
-
-    if [ -z "$WIFI_SSID" ]; then
-        warn "No SSID entered — skipping infrastructure WiFi"
-        warn "Mesh networking is still configured. To add WiFi later:"
-        warn "  sudo nmcli dev wifi connect <SSID> [password <PASS>]"
-    else
-        # Write NetworkManager keyfile (low priority so mesh is preferred)
-        if [ -z "$WIFI_PASSWORD" ]; then
-            sudo tee "$NM_CONN_FILE" > /dev/null <<EOF
-[connection]
-id=ewego-wifi
-type=wifi
-autoconnect=yes
-autoconnect-priority=-1
-
-[wifi]
-mode=infrastructure
-ssid=$WIFI_SSID
-
-[ipv4]
-method=auto
-
-[ipv6]
-method=auto
-addr-gen-mode=stable-privacy
-EOF
-        else
-            sudo tee "$NM_CONN_FILE" > /dev/null <<EOF
-[connection]
-id=ewego-wifi
-type=wifi
-autoconnect=yes
-autoconnect-priority=-1
-
-[wifi]
-mode=infrastructure
-ssid=$WIFI_SSID
-
-[wifi-security]
-auth-alg=open
-key-mgmt=wpa-psk
-psk=$WIFI_PASSWORD
-
-[ipv4]
-method=auto
-
-[ipv6]
-method=auto
-addr-gen-mode=stable-privacy
-EOF
-        fi
-        sudo chmod 600 "$NM_CONN_FILE"
-        info "Infrastructure WiFi configured for SSID: $WIFI_SSID (low priority)"
-    fi
-fi
-
-sudo nmcli connection reload
+# Reload NM so it picks up the unmanaged-devices config
+sudo systemctl restart NetworkManager
 
 # --------------------------------------------------------------------------
 # 7. /boot/firmware/config.txt (hardware overlays)
@@ -311,18 +298,21 @@ echo "==========================================================================
 echo ""
 echo " What was configured:"
 echo "   - Hostname: ewe${DEVICE_NUM}"
-echo "   - Mesh WiFi: SSID=ewego-mesh, IP=${MESH_IP}/24, channel 6 (2.4 GHz)"
-echo "   - python3-picamera2, i2c-tools, python3-smbus2 installed via apt"
+echo "   - B.A.T.M.A.N. mesh: IBSS=ewego-mesh, bat0 IP=${MESH_IP}/24, channel 6"
+echo "   - python3-picamera2, i2c-tools, python3-smbus2, batctl installed via apt"
 echo "   - uv + Python venv with pyserial, pyubx2"
-echo "   - i2c-dev kernel module set to load on boot"
+echo "   - i2c-dev + batman-adv kernel modules set to load on boot"
 echo "   - config.txt: disable-bt, dual cameras, audio hat, GPS, IMU, fuel gauge"
 echo ""
-echo " Mesh networking:"
-echo "   This device: ewe${DEVICE_NUM} → ${MESH_IP}"
+echo " Mesh networking (B.A.T.M.A.N. Advanced over IBSS):"
+echo "   This device: ewe${DEVICE_NUM} → ${MESH_IP} on bat0"
 echo "   All devices on the mesh use 10.0.0.N (where N = device number)"
+echo "   Managed by: systemd ewego-mesh.service (not NetworkManager)"
+echo "   wlan0 is in ad-hoc (IBSS) mode — infrastructure WiFi not available"
 echo "   Verify after reboot:"
-echo "     iw dev wlan0 info              # Should show: type mesh point"
-echo "     iw dev wlan0 station dump      # List mesh peers"
+echo "     sudo batctl meshif bat0 n      # Show mesh neighbors"
+echo "     sudo batctl meshif bat0 o      # Show originator table"
+echo "     ip addr show bat0              # Show bat0 IP"
 echo "     ping 10.0.0.<other>            # Ping another device"
 echo "   Join from laptop:"
 echo "     bash Firmware/setup/mesh_join.sh join 100"
