@@ -10,7 +10,7 @@ import sys
 import struct
 import threading
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
 import shutil
 import subprocess
 import os
@@ -190,6 +190,19 @@ class MinimalRecorder:
         self.cam2.start_recording(enc2, self.out2)
 
         self.running = True
+        
+        # Save wall-clock anchor so player can display real UTC
+        _wall = datetime.now(timezone.utc)
+        _mono_us = int(time.monotonic() * 1e6)
+        
+        # Creating subd-directory to keep time txt files 
+        cam_dir = self.dir/ "camera"
+        cam_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Writing wall clock  and monotonic clock to text files
+        (cam_dir / "start_time.txt").write_text(_wall.isoformat())
+        (cam_dir / "start_time_mono_us.txt").write_text(str(_mono_us))
+        
         print(f"Recording to: {self.dir}")
         print("Timestamps: camera1_timestamps.bin, camera2_timestamps.bin")
         print("Format: Raw binary float64 (8 bytes per timestamp)")
