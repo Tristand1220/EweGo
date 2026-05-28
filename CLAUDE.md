@@ -59,12 +59,13 @@ EweGo/
 - B.A.T.M.A.N. Advanced (batman-adv) over IBSS (ad-hoc) mode — no router needed
 - The CM4's BCM43455 does NOT support 802.11s; IBSS is the transport layer
 - IBSS SSID: `ewego-mesh`, channel 6 (2437 MHz), fixed cell ID `02:12:34:56:78:9A`
+- IBSS join uses `NOHT` — `HT20` returns EINVAL on BCM43455 in IBSS mode
 - batman-adv kernel module creates virtual `bat0` interface for L2 mesh routing
-- Hostname convention: `eweN` (ewe1, ewe2, ...) → mesh IP `10.0.0.N/24` on bat0
+- Hostname convention: `eweN` (ewe1, ewe2, ...) → mesh IP `10.42.0.N/24` on bat0
 - Managed by systemd `ewego-mesh.service` (not NetworkManager)
 - NM ignores wlan0 via `/etc/NetworkManager/conf.d/ewego-unmanaged.conf`
 - Infrastructure WiFi not available (ad-hoc takes over wlan0; use USB adapter or ethernet)
-- Join from laptop: `bash Firmware/setup/mesh_join.sh join 100` → 10.0.0.100
+- Join from laptop: `bash Firmware/setup/mesh_join.sh join 100` → 10.42.0.100
 - Verify: `sudo batctl meshif bat0 n` (neighbors), `sudo batctl meshif bat0 o` (originators)
 
 ### Known Bugs
@@ -80,7 +81,7 @@ EweGo/
 - Deploy to Pi: `bash Firmware/setup/deploy.sh ewe1.local [user]`
   - Rsyncs using `.rsyncignore` (excludes Hardware/, .venv/, __pycache__/, .git/, recordings/, CLAUDE.md)
   - Prompts to run `pi_setup.sh` and reboot on the remote
-  - Works over mesh (`10.0.0.N`) or infrastructure WiFi
+  - Works over mesh (`10.42.0.N`) or infrastructure WiFi
 - Run test: `cd ~/EweGo && uv run python Firmware/sensor_test.py`
 
 ## User Preferences

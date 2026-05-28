@@ -127,7 +127,7 @@ if [[ "$PI_HOSTNAME" =~ ^ewe([0-9]+)$ ]]; then
     DEVICE_NUM="${BASH_REMATCH[1]}"
     info "Device number: $DEVICE_NUM (from hostname)"
 else
-    read -r -p "  Device number for mesh IP 10.0.0.X (1-254): " DEVICE_NUM
+    read -r -p "  Device number for mesh IP 10.42.0.X (1-254): " DEVICE_NUM
     if ! [[ "$DEVICE_NUM" =~ ^[0-9]+$ ]] || [ "$DEVICE_NUM" -lt 1 ] || [ "$DEVICE_NUM" -gt 254 ]; then
         warn "Invalid device number — skipping mesh profile"
         DEVICE_NUM=""
@@ -142,7 +142,7 @@ mkdir -p "$NM_CONN_DIR"
 
 # Mesh connection (primary — devices auto-connect to each other)
 if [ -n "$DEVICE_NUM" ]; then
-    MESH_IP="10.0.0.${DEVICE_NUM}"
+    MESH_IP="10.42.0.${DEVICE_NUM}"
     cat > "$NM_CONN_DIR/ewego-mesh.nmconnection" << EOF
 [connection]
 id=ewego-mesh
@@ -219,7 +219,7 @@ echo ""
 echo "  What was done:"
 echo "    - Removed corrupted netplan files"
 if [ -n "$DEVICE_NUM" ]; then
-echo "    - Wrote NM mesh profile (ewego-mesh, IP=10.0.0.${DEVICE_NUM})"
+echo "    - Wrote NM mesh profile (ewego-mesh, IP=10.42.0.${DEVICE_NUM})"
 fi
 echo "    - Wrote NM wifi profile for '$SSID' (low priority fallback)"
 echo "    - Wrote NM wired profile for eth0"
@@ -229,7 +229,7 @@ echo "    1. Safely eject the SD card"
 echo "    2. Insert into the Pi and power on"
 echo "    3. Wait ~30 seconds for mesh/wifi to connect"
 if [ -n "$DEVICE_NUM" ]; then
-echo "    4. From mesh: ssh user@ewe${DEVICE_NUM}.local (or 10.0.0.${DEVICE_NUM})"
+echo "    4. From mesh: ssh user@ewe${DEVICE_NUM}.local (or 10.42.0.${DEVICE_NUM})"
 else
 echo "    4. Try: ssh user@<hostname>.local"
 fi

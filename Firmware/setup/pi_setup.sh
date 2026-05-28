@@ -60,8 +60,7 @@ sudo apt install -y --no-install-recommends \
     python3-picamera2 \
     python3-libcamera \
     i2c-tools \
-    python3-smbus2 \
-    batctl
+    python3-smbus2
 
 # --------------------------------------------------------------------------
 # 2. uv (Python package manager)
@@ -101,29 +100,21 @@ else
     info "i2c-dev already configured"
 fi
 
-# batman-adv kernel module (for mesh networking)
-if [ ! -f /etc/modules-load.d/batman-adv.conf ]; then
-    info "Enabling batman-adv module on boot..."
-    echo "batman-adv" | sudo tee /etc/modules-load.d/batman-adv.conf
-else
-    info "batman-adv already configured"
-fi
-
 # --------------------------------------------------------------------------
 # 5. Hostname configuration
 # --------------------------------------------------------------------------
 # EweGo devices use the naming convention ewe1, ewe2, ewe3, ...
-# The device number determines the mesh network IP: eweN → 10.0.0.N
+# The device number determines the mesh network IP: eweN → 10.42.0.N
 CURRENT_HOSTNAME=$(hostname)
-if [[ "$CURRENT_HOSTNAME" =~ ^ewe([0-9]+)$ ]]; then
-    DEVICE_NUM="${BASH_REMATCH[1]}"
+if [[ "$CURRENT_HOSTNAME" =~ ^ewe[^0-9]*([0-9]+)$ ]]; then
+    DEVICE_NUM=$((10#${BASH_REMATCH[1]}))
     info "Hostname: $CURRENT_HOSTNAME (device #$DEVICE_NUM)"
 else
     echo ""
     info "Hostname configuration"
     echo "  Current hostname: $CURRENT_HOSTNAME"
     echo "  EweGo devices use the naming convention: ewe1, ewe2, ewe3, ..."
-    echo "  The device number determines the mesh IP: eweN → 10.0.0.N"
+    echo "  The device number determines the mesh IP: eweN → 10.42.0.N"
     echo ""
     read -r -p "  Device number (1-254): " DEVICE_NUM
 
@@ -137,108 +128,6 @@ else
     sudo hostnamectl set-hostname "$NEW_HOSTNAME"
     info "Hostname set (fully active after reboot)"
 fi
-
-# --------------------------------------------------------------------------
-# 6. B.A.T.M.A.N. mesh networking
-# --------------------------------------------------------------------------
-# The CM4's BCM43455 does NOT support 802.11s mesh mode. Instead we use
-# IBSS (ad-hoc) mode as the transport layer with batman-adv for L2 mesh
-# routing. A systemd service manages the mesh (not NetworkManager).
-MESH_IP="10.0.0.${DEVICE_NUM}"
-
-# Clean up empty/corrupt netplan files left by first-boot auto-config
-if [ -d /etc/netplan ]; then
-    for f in /etc/netplan/90-NM-*.yaml; do
-        [ -f "$f" ] || continue
-        if [ ! -s "$f" ]; then
-            info "Removing empty netplan file: $f"
-            sudo rm -f "$f"
-        fi
-    done
-fi
-
-# Remove old 802.11s mesh profile if present (from previous setup attempts)
-sudo rm -f /etc/NetworkManager/system-connections/ewego-mesh.nmconnection
-
-# Tell NetworkManager to leave wlan0 alone (we manage it via systemd)
-NM_UNMANAGED="/etc/NetworkManager/conf.d/ewego-unmanaged.conf"
-if [ ! -f "$NM_UNMANAGED" ]; then
-    info "Configuring NetworkManager to ignore wlan0..."
-    sudo mkdir -p /etc/NetworkManager/conf.d
-    sudo tee "$NM_UNMANAGED" > /dev/null <<'EOF'
-[keyfile]
-unmanaged-devices=interface-name:wlan0
-EOF
-fi
-
-# --- 6a. Mesh startup script ---
-MESH_SCRIPT="/usr/local/bin/ewego-mesh-start.sh"
-info "Installing mesh startup script ($MESH_SCRIPT)..."
-sudo tee "$MESH_SCRIPT" > /dev/null <<'SCRIPT'
-#!/usr/bin/env bash
-set -euo pipefail
-
-# Derive device number from hostname (eweN → N)
-HOSTNAME=$(hostname)
-if [[ "$HOSTNAME" =~ ^ewe([0-9]+)$ ]]; then
-    DEVICE_NUM="${BASH_REMATCH[1]}"
-else
-    echo "ERROR: hostname '$HOSTNAME' does not match eweN pattern"
-    exit 1
-fi
-
-MESH_IP="10.0.0.${DEVICE_NUM}"
-IFACE="wlan0"
-CELL="02:12:34:56:78:9A"   # Fixed IBSS cell ID — all nodes must match
-
-# Load batman-adv if not already loaded
-modprobe batman-adv 2>/dev/null || true
-
-# Set up IBSS (ad-hoc) mode on wlan0
-ip link set "$IFACE" down
-iw dev "$IFACE" set type ibss
-ip link set "$IFACE" up
-
-# Join the IBSS cell (2437 MHz = channel 6, 2.4 GHz)
-iw dev "$IFACE" ibss join ewego-mesh 2437 HT20 fixed-freq "$CELL"
-
-# Add wlan0 to batman mesh
-batctl meshif bat0 if add "$IFACE" 2>/dev/null || true
-
-# Bring up bat0 and assign static IP
-ip link set bat0 up
-ip addr flush dev bat0
-ip addr add "${MESH_IP}/24" dev bat0
-
-echo "Mesh active: bat0 = ${MESH_IP}/24 (IBSS + batman-adv)"
-SCRIPT
-sudo chmod 755 "$MESH_SCRIPT"
-
-# --- 6b. Systemd service ---
-MESH_SERVICE="/etc/systemd/system/ewego-mesh.service"
-info "Installing mesh systemd service ($MESH_SERVICE)..."
-sudo tee "$MESH_SERVICE" > /dev/null <<'EOF'
-[Unit]
-Description=EweGo B.A.T.M.A.N. Mesh Network
-After=network-pre.target
-Wants=network-pre.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/usr/local/bin/ewego-mesh-start.sh
-ExecStop=/usr/bin/ip link set bat0 down
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable ewego-mesh.service
-info "Mesh service enabled (starts on boot)"
-
-# Reload NM so it picks up the unmanaged-devices config
-sudo systemctl restart NetworkManager
 
 # --------------------------------------------------------------------------
 # 7. /boot/firmware/config.txt (hardware overlays)
@@ -293,29 +182,17 @@ fi
 # --------------------------------------------------------------------------
 echo ""
 echo "============================================================================"
-echo " Setup Complete"
+echo " Base Setup Complete"
 echo "============================================================================"
 echo ""
 echo " What was configured:"
 echo "   - Hostname: ewe${DEVICE_NUM}"
-echo "   - B.A.T.M.A.N. mesh: IBSS=ewego-mesh, bat0 IP=${MESH_IP}/24, channel 6"
-echo "   - python3-picamera2, i2c-tools, python3-smbus2, batctl installed via apt"
+echo "   - python3-picamera2, i2c-tools, python3-smbus2 installed via apt"
 echo "   - uv + Python venv with pyserial, pyubx2"
-echo "   - i2c-dev + batman-adv kernel modules set to load on boot"
+echo "   - i2c-dev kernel module on boot"
 echo "   - config.txt: disable-bt, dual cameras, audio hat, GPS, IMU, fuel gauge"
 echo ""
-echo " Mesh networking (B.A.T.M.A.N. Advanced over IBSS):"
-echo "   This device: ewe${DEVICE_NUM} → ${MESH_IP} on bat0"
-echo "   All devices on the mesh use 10.0.0.N (where N = device number)"
-echo "   Managed by: systemd ewego-mesh.service (not NetworkManager)"
-echo "   wlan0 is in ad-hoc (IBSS) mode — infrastructure WiFi not available"
-echo "   Verify after reboot:"
-echo "     sudo batctl meshif bat0 n      # Show mesh neighbors"
-echo "     sudo batctl meshif bat0 o      # Show originator table"
-echo "     ip addr show bat0              # Show bat0 IP"
-echo "     ping 10.0.0.<other>            # Ping another device"
-echo "   Join from laptop:"
-echo "     bash Firmware/setup/mesh_join.sh join 100"
+echo " Mesh networking: NOT configured (run mesh_setup.sh to enable)"
 echo ""
 echo " Hardware pin assignments:"
 echo "   GPIO 2/3   - I2C bus 1 (fuel gauge MAX17048 @ 0x36)"
@@ -325,8 +202,29 @@ echo "   GPIO 12/13 - UART5 (IMU BNO055)"
 echo "   GPIO 14/15 - Debug console (ttyAMA0, 115200 baud) — Bluetooth disabled"
 echo "   CAM0/CAM1  - Dual IMX708 cameras"
 echo ""
-echo " To test after reboot:"
+echo " To test sensors after reboot:"
 echo "   cd ~/EweGo && uv run python Firmware/sensor_test.py"
+echo ""
+echo "============================================================================"
+echo ""
+
+# --------------------------------------------------------------------------
+# 9. Optional: chain into mesh setup
+# --------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+MESH_SETUP="${SCRIPT_DIR}/mesh_setup.sh"
+if [ -f "$MESH_SETUP" ]; then
+    read -r -p "Configure B.A.T.M.A.N. mesh networking now? [y/N] " ANSWER
+    if [[ "$ANSWER" =~ ^[Yy]$ ]]; then
+        echo ""
+        bash "$MESH_SETUP" install
+    else
+        info "Skipped. Run later with: bash ${MESH_SETUP}"
+    fi
+else
+    warn "mesh_setup.sh not found at $MESH_SETUP (mesh setup unavailable)"
+fi
+
 echo ""
 echo " *** REBOOT REQUIRED for config.txt changes ***"
 echo "   Run: sudo reboot"
