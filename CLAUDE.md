@@ -68,6 +68,23 @@ EweGo/
 - Join from laptop: `bash Firmware/setup/mesh_join.sh join 100` → 10.42.0.100
 - Verify: `sudo batctl meshif bat0 n` (neighbors), `sudo batctl meshif bat0 o` (originators)
 
+### USB-C SSH (per-device subnets)
+- Each Pi advertises a unique /24 on its `usb0`: `10.55.<DEVICE_NUM>.1/24`
+  (eweN → 10.55.N.1). Avoids same-subnet routing ambiguity when multiple Pis
+  are plugged into one laptop simultaneously.
+- Laptop helper: `bash Firmware/setup/ewego_usb.sh [list|up|down|ssh] [N|hostname]`
+  - `list` (default): show USB Ethernet ifaces with their current IPs and
+    reachability of the configured Pi at `10.55.<N>.1`
+  - `up N`: assign `10.55.N.100/24`; with multiple USB ifaces, tries each
+    until one's Pi responds at `10.55.N.1`
+  - `ssh N`: assign IP if needed, then ssh to `user@10.55.N.1`
+- USB gadget configured in `pi_setup.sh` section 6 (dwc2 + g_ether)
+- Config.txt booby-traps auto-handled: `otg_mode=1`, `dr_mode=host`, and bare
+  `dtoverlay=dwc2` are detected and corrected to `dr_mode=peripheral`
+- Cloud-init `preserve_hostname` is flipped to `true` when pi_setup.sh renames
+  the host, otherwise the original imager hostname comes back on every reboot
+- USB-C SSH and mesh are fully independent (different ifaces, different subnets)
+
 ### Known Bugs
 - See `Firmware/bugs/` for documented issues and fix scripts
 - **Power loss / first-boot corruption**: Pi reset during first boot can truncate

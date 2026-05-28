@@ -126,7 +126,77 @@ else
     NEW_HOSTNAME="ewe${DEVICE_NUM}"
     info "Setting hostname to $NEW_HOSTNAME..."
     sudo hostnamectl set-hostname "$NEW_HOSTNAME"
+
+    # Update /etc/hosts so sudo doesn't complain about unresolvable hostname
+    if ! grep -q "$NEW_HOSTNAME" /etc/hosts; then
+        sudo sed -i "s/127\.0\.1\.1.*/127.0.1.1\t$NEW_HOSTNAME/" /etc/hosts
+        # If no 127.0.1.1 line existed, add one
+        if ! grep -q "127.0.1.1" /etc/hosts; then
+            echo -e "127.0.1.1\t$NEW_HOSTNAME" | sudo tee -a /etc/hosts > /dev/null
+        fi
+    fi
+
+    # Stop cloud-init from re-applying the original imager hostname on every
+    # boot. Pi OS ships with preserve_hostname=false, which silently reverts
+    # any manual rename. Must be flipped on every Pi where we rename.
+    if [ -f /etc/cloud/cloud.cfg ] && grep -q "^preserve_hostname" /etc/cloud/cloud.cfg; then
+        if ! grep -q "^preserve_hostname: true" /etc/cloud/cloud.cfg; then
+            info "Disabling cloud-init hostname reset (preserve_hostname: true)..."
+            sudo sed -i 's/^preserve_hostname.*/preserve_hostname: true/' /etc/cloud/cloud.cfg
+        fi
+    elif [ -f /etc/cloud/cloud.cfg ]; then
+        info "Disabling cloud-init hostname reset (preserve_hostname: true)..."
+        echo "preserve_hostname: true" | sudo tee -a /etc/cloud/cloud.cfg > /dev/null
+    fi
+
     info "Hostname set (fully active after reboot)"
+fi
+
+# --------------------------------------------------------------------------
+# 6. USB Ethernet gadget (SSH over USB-C)
+# --------------------------------------------------------------------------
+# Enables the Pi to appear as a USB Ethernet adapter when connected via USB-C.
+# Creates a usb0 interface with a static IP for reliable SSH access.
+# This is independent of wlan0/bat0 and doesn't affect mesh networking.
+# Placed early so it's configured even if later steps fail or kill SSH.
+
+# Load g_ether module on boot
+if ! grep -q "g_ether" /etc/modules-load.d/usb-gadget.conf 2>/dev/null; then
+    info "Enabling USB Ethernet gadget on boot..."
+    printf "dwc2\ng_ether\n" | sudo tee /etc/modules-load.d/usb-gadget.conf
+else
+    info "USB Ethernet gadget already configured"
+fi
+
+# Configure static IP on usb0 via NetworkManager
+USB_CONN_FILE="/etc/NetworkManager/system-connections/usb-gadget.nmconnection"
+# Per-device USB subnet: each Pi gets its own /24 so the laptop can host
+# multiple USB-C-connected Pis at once without same-subnet routing ambiguity.
+USB_IP="10.55.${DEVICE_NUM}.1"
+if [ ! -f "$USB_CONN_FILE" ] || ! sudo grep -q "address1=${USB_IP}/24" "$USB_CONN_FILE" 2>/dev/null; then
+    info "Configuring USB gadget network (usb0 = $USB_IP)..."
+    sudo tee "$USB_CONN_FILE" > /dev/null <<EOF
+[connection]
+id=usb-gadget
+type=ethernet
+interface-name=usb0
+autoconnect=yes
+
+[ipv4]
+method=manual
+address1=${USB_IP}/24
+
+[ipv6]
+method=link-local
+EOF
+    sudo chmod 600 "$USB_CONN_FILE"
+    # Apply immediately so re-runs on an existing Pi take effect without
+    # waiting for reboot. Safe over USB-C — only this one connection cycles.
+    sudo nmcli connection reload 2>/dev/null || true
+    sudo nmcli connection down usb-gadget 2>/dev/null || true
+    sudo nmcli connection up usb-gadget 2>/dev/null || true
+else
+    info "USB gadget network already configured at $USB_IP/24"
 fi
 
 # --------------------------------------------------------------------------
@@ -137,6 +207,34 @@ info "Configuring $CONFIG..."
 
 # Back up current config
 sudo cp "$CONFIG" "${CONFIG}.bak.$(date +%Y%m%d_%H%M%S)"
+
+# --- USB gadget mode booby-traps in config.txt -----------------------------
+# These three blocks run on every invocation (not gated on the imx708 check)
+# so re-runs stay idempotent. All three silently break USB-C SSH if left in
+# place, and stock Pi OS images can ship with any of them.
+
+# (a) otg_mode=1 — switches the OTG port to the XHCI host controller, which
+# disables dwc2 entirely. Common in stock images under the [cm4] section to
+# expose the OTG port as an extra USB host. Lethal for gadget mode.
+if grep -qE "^[[:space:]]*otg_mode=1[[:space:]]*$" "$CONFIG"; then
+    warn "Disabling 'otg_mode=1' — forces XHCI host, blocks USB gadget on CM4"
+    sudo sed -i -E 's|^([[:space:]]*otg_mode=1[[:space:]]*)$|#\1  # disabled by pi_setup.sh: conflicts with USB gadget|' "$CONFIG"
+fi
+
+# (b) dtoverlay=dwc2,dr_mode=host — puts the dwc2 controller in host-only
+# mode, so g_ether finds no UDC to bind to.
+if grep -qE "^[[:space:]]*dtoverlay=dwc2.*dr_mode=host" "$CONFIG"; then
+    warn "Disabling 'dtoverlay=dwc2,dr_mode=host' — blocks USB gadget mode"
+    sudo sed -i -E 's|^([[:space:]]*dtoverlay=dwc2.*dr_mode=host.*)$|#\1  # disabled by pi_setup.sh: conflicts with USB gadget|' "$CONFIG"
+fi
+
+# (c) Bare 'dtoverlay=dwc2' — defaults to dr_mode=otg, which relies on the
+# OTG_ID pin being pulled correctly. Unreliable across carrier boards. Force
+# peripheral mode so the controller comes up as a UDC regardless of hardware.
+if grep -qE "^[[:space:]]*dtoverlay=dwc2[[:space:]]*$" "$CONFIG"; then
+    warn "Upgrading bare 'dtoverlay=dwc2' → 'dtoverlay=dwc2,dr_mode=peripheral'"
+    sudo sed -i -E 's|^([[:space:]]*)dtoverlay=dwc2[[:space:]]*$|\1dtoverlay=dwc2,dr_mode=peripheral|' "$CONFIG"
+fi
 
 # Check if our hardware block is already present
 if grep -q "dtoverlay=imx708,cam0" "$CONFIG" 2>/dev/null; then
@@ -174,6 +272,12 @@ dtparam=i2c_arm=on
 
 # GPU memory for H.264 encoding
 gpu_mem=256
+
+# USB-C Ethernet gadget (SSH over USB-C cable)
+# dr_mode=peripheral is required — without it, the controller defaults to
+# 'otg' and depends on the OTG_ID pin being pulled correctly, which varies
+# across carrier boards. Forcing peripheral makes gadget mode reliable.
+dtoverlay=dwc2,dr_mode=peripheral
 EOF
 fi
 
@@ -187,9 +291,10 @@ echo "==========================================================================
 echo ""
 echo " What was configured:"
 echo "   - Hostname: ewe${DEVICE_NUM}"
+echo "   - USB-C SSH: usb0 = 10.55.${DEVICE_NUM}.1/24 (plug USB-C to laptop)"
 echo "   - python3-picamera2, i2c-tools, python3-smbus2 installed via apt"
 echo "   - uv + Python venv with pyserial, pyubx2"
-echo "   - i2c-dev kernel module on boot"
+echo "   - i2c-dev + dwc2/g_ether kernel modules on boot"
 echo "   - config.txt: disable-bt, dual cameras, audio hat, GPS, IMU, fuel gauge"
 echo ""
 echo " Mesh networking: NOT configured (run mesh_setup.sh to enable)"
