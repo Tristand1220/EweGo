@@ -60,28 +60,34 @@ def resolve_wall_clock(timestamps, cam_dir):
         timestamps (_type_): _description_
         cam_dir (_type_): _description_
     """
+    print(f"Resolving wall clock for camera directory: {cam_dir}")
     
     # Written by dual_camera recorder
     start_time_file = os.path.join(cam_dir, 'start_time.txt')
-    start_mono_file = os.path.join(cam_dir, 'start_mono_us.txt')
+    start_mono_file = os.path.join(cam_dir, 'start_time_mono_us.txt')
     
     # Grabbing starting clock times from text files (wall clock with timezone)
     if os.path.exists(start_time_file):
+        print("start time file found")
         with open(start_time_file) as f:
             wall = datetime.fromisoformat(f.read().strip())
         if wall.tzinfo is None:
             wall = wall.replace(tzinfo=timezone.utc)
        
-    # Grabbing starting clock times from text files (microseconds)     
-    if os.path.exists(start_mono_file):
-        with open(start_mono_file) as f:
-            start_mono_us = int(f.read().strip())
-            
-        # Finding difference between microsecond start to count up from wall time 
-        delta_us = timestamps[0] - start_mono_us
-        wall = wall + timedelta(microseconds=delta_us)
+        # Grabbing starting clock times from text files (microseconds)     
+        if os.path.exists(start_mono_file):
+            print("mono time file found")
+            with open(start_mono_file) as f:
+                start_mono_us = int(f.read().strip())
+                
+            # Finding difference between microsecond start to count up from wall time 
+            delta_us = timestamps[0] - start_mono_us
+            wall = wall + timedelta(microseconds=delta_us)
         
-    return wall
+        return wall
+    else:
+        print("start time file not found")
+   
 
 
 def find_video_file(camera_num, directory='.'):
@@ -435,8 +441,9 @@ def play_dual_video(video_file1, timestamps1, fmt1,
 
 # ADDED "wall_start" to paramter list
 def export_dual_video(video_file1, timestamps1, fmt1,
-                      video_file2, timestamps2, fmt2,
-                      output_file, flip=True, swap=True, audio_file=None, wall_start=None):
+    video_file2, timestamps2, fmt2,
+    output_file, flip=True, swap=True, audio_file=None,
+    wall_start=None):
     """Export dual side-by-side video to MP4 with timestamp overlay and optional audio.
 
     Uses a single ffmpeg filter_complex command — no Python frame loop.
@@ -460,16 +467,14 @@ def export_dual_video(video_file1, timestamps1, fmt1,
     duration_sec = (timestamps1[-1] - timestamps1[0]) / 1e6
     total_frames = len(timestamps1)
     avg_fps = total_frames / duration_sec
-    
-    # UTC timestamp is reconstructed
-    start_us = timestamps1[0]
 
     print(f"Exporting to {output_file}")
-    print(f"  Duration: {duration_sec:.1f}s @ {avg_fps:.1f}fps")
-    print(f"  Camera offset: {offset_sec*1000:.1f}ms")
-    print(f"  UTC start: {start_us} ms")
+    print(f" Duration: {duration_sec:.1f}s @ {avg_fps:.1f}fps")
+    print(f" Camera offset: {offset_sec*1000:.1f}ms")
+    if wall_start:
+        print(f" Recording start UTC: {wall_start.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]}Z")
     if audio_file:
-        print(f"  Audio: {audio_file}")
+        print(f" Audio: {audio_file}")
 
     # Build filter: flip both cameras (180°), then stack side-by-side, then overlay time
     # vflip+hflip = 180° rotation without interpolation (fast)
@@ -485,31 +490,29 @@ def export_dual_video(video_file1, timestamps1, fmt1,
         stack = "[v2][v1]hstack=inputs=2[vid]"
     else:
         stack = "[v1][v2]hstack=inputs=2[vid]"
-    # NEW ADDITION 05/20: Adding UTC wall clock to exported video
-    
-    # drawtext with PTS-based timestamp (matches actual video time)
+
+    # Line 1: relative time via ffmpeg pts
+    # Line 2: absolute UTC ISO time.
+    # ffmpeg's 'localtime' drawtext function takes a Unix epoch (seconds) and
+    # a strftime format string. We pass wall_start.timestamp() as the base and
+    # add pts (seconds since container start) to get the per-frame UTC time.
+    # The colon in %H:%M:%S must be escaped as \: inside the drawtext string.
     if wall_start is not None:
-        # Seconds since Unix epoch at the first frame of camera 1
-        start_unix_sec = wall_start.timestamp()
-        # ffmpeg expr: utc_unix = start_unix_sec + pts
-        # strftime uses the 'localtime' function which interprets seconds as UTC
-        # when we supply a UTC epoch value and pass 0 as the utc_offset.
-        utc_text = (
-            f"drawtext=text='UTC\\: %{{pts\\:localtime\\:{start_unix_sec:.6f}\\:%Y-%m-%dT%H\\\\\\:%M\\\\\\:%S}}Z'"
+        base_unix = wall_start.timestamp() # float: seconds since Unix epoch
+        utc_drawtext = (
+            f"drawtext=text='UTC\\: %{{pts\\:localtime\\:{base_unix:.6f}\\:%Y-%m-%dT%H\\\\\\:%M\\\\\\:%S}}Z'"
             ":x=10:y=42:fontsize=24:fontcolor=green:borderw=1:bordercolor=black"
         )
     else:
-        # Fallback: shpw raw microsecond values
-        start_us = timestamps1[0]
-        utc_text = (
-            f"drawtext=text='UTC\\: {start_us}+trunc(pts*1000000) µs (no anchor)'"
+        utc_drawtext = (
+            "drawtext=text='UTC\\: no anchor'"
             ":x=10:y=42:fontsize=24:fontcolor=green:borderw=1:bordercolor=black"
         )
 
     drawtext = (
         "[vid]drawtext=text='Time\\: %{{pts\\:hms}}'"
         ":x=10:y=10:fontsize=24:fontcolor=green:borderw=1:bordercolor=black,"
-        f"{utc_text}"
+        f"{utc_drawtext}"
         "[out]"
     )
 
@@ -540,15 +543,16 @@ def export_dual_video(video_file1, timestamps1, fmt1,
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '20',
         '-pix_fmt', 'yuv420p',
     ]
+    
     if audio_file:
         ffmpeg_cmd += ['-c:a', 'aac', '-b:a', '192k', '-shortest']
     ffmpeg_cmd.append(output_file)
 
-    print(f"  Running ffmpeg...")
+    print(f" Running ffmpeg...")
     result = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
 
     if result.returncode != 0:
-        print(f"  ffmpeg failed: {result.stderr[-500:]}")
+        print(f" ffmpeg failed: {result.stderr[-500:]}")
         return
 
     # Report output file size
@@ -652,7 +656,7 @@ def main():
         timestamps2 = load_timestamps(timestamp_file2)
         
         # NEW ADDITION: Resolve wall-clock anchor for UTC display
-        wall_start  =resolve_wall_clock(timestamps1, cam_dir)
+        wall_start = resolve_wall_clock(timestamps1, cam_dir)
         if wall_start:
              print(f"  Recording start UTC: {wall_start.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3]}Z")
 

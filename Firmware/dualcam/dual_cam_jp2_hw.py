@@ -196,12 +196,12 @@ class MinimalRecorder:
         _mono_us = int(time.monotonic() * 1e6)
         
         # Creating subd-directory to keep time txt files 
-        cam_dir = self.dir/ "camera"
-        cam_dir.mkdir(parents=True, exist_ok=True)
+        #cam_dir = self.dir/ "camera"
+        #cam_dir.mkdir(parents=True, exist_ok=True)
         
         # Writing wall clock  and monotonic clock to text files
-        (cam_dir / "start_time.txt").write_text(_wall.isoformat())
-        (cam_dir / "start_time_mono_us.txt").write_text(str(_mono_us))
+        (self.dir / "start_time.txt").write_text(_wall.isoformat())
+        (self.dir / "start_time_mono_us.txt").write_text(str(_mono_us))
         
         print(f"Recording to: {self.dir}")
         print("Timestamps: camera1_timestamps.bin, camera2_timestamps.bin")
@@ -348,4 +348,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
