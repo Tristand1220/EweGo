@@ -95,7 +95,7 @@ EweGo/
   (~3+ hours). Recorder and player both handle this now.
 
 ### Deployment
-- Deploy to Pi: `bash Firmware/setup/deploy.sh ewe1.local [user]`
+- Deploy to Pi: `bash Firmware/setup/deploy.sh [user@]ewe1.local`
   - Rsyncs using `.rsyncignore` (excludes Hardware/, .venv/, __pycache__/, .git/, recordings/, CLAUDE.md)
   - Prompts to run `pi_setup.sh` and reboot on the remote
   - Works over mesh (`10.42.0.N`) or infrastructure WiFi
