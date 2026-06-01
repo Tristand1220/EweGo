@@ -60,7 +60,9 @@ sudo apt install -y --no-install-recommends \
     python3-picamera2 \
     python3-libcamera \
     i2c-tools \
-    python3-smbus2
+    python3-smbus2 \
+    chrony \
+    pps-tools
 
 # --------------------------------------------------------------------------
 # 2. uv (Python package manager)
@@ -197,6 +199,28 @@ EOF
     sudo nmcli connection up usb-gadget 2>/dev/null || true
 else
     info "USB gadget network already configured at $USB_IP/24"
+fi
+
+# --------------------------------------------------------------------------
+# 7. Chrony (GPS PPS time sync)
+# --------------------------------------------------------------------------
+CHRONY_CONF_SRC="$EWEGO_DIR/Firmware/setup/chrony.conf"
+CHRONY_CONF_DST="/etc/chrony/chrony.conf"
+
+if [ ! -f "$CHRONY_CONF_SRC"]; then
+    warn "chrony.conf not found at $CHRONY_CONF_SRC - skipping chrony configurations"
+    warn "Place chrony.conf in Firmware/setup/ and re-run to configure"
+else
+    info "Deploying chrony configuration..."
+    sudo cp "$CHRONY_CONF_SRC" "$CHRONY_CONF_DST"
+    sudo chown root:root "$CHRONY_CONF_DST"
+    sudo chmod 644 "$CHRONY_CONF_DST"
+
+    info "Enabling and restarting chrony service..."
+    sudo systemctl enable chrony
+    sudo systemctl restart chrony
+
+    info "Chrony configured (GPS PPS on GPIO 18 via /dev/pps0)"
 fi
 
 # --------------------------------------------------------------------------
