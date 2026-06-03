@@ -156,7 +156,15 @@ cmd_up() {
     done
 
     # Brute-force discovery: try each iface, assign IP, ping. Keep on success.
+    # Skip ifaces already configured for some OTHER EweGo Pi so we don't strip
+    # working setups (e.g. running 'up 7' must not nuke Pi #8's iface IP).
     for iface in "${ifaces[@]}"; do
+        local cur
+        cur=$(ip -4 -br addr show "$iface" 2>/dev/null | awk '{print $3}')
+        if [[ "$cur" =~ ^10\.55\.([0-9]+)\.100/24$ ]] && [ "${BASH_REMATCH[1]}" != "$n" ]; then
+            info "  $iface holds 10.55.${BASH_REMATCH[1]}.100/24 (Pi #${BASH_REMATCH[1]}) — skipping"
+            continue
+        fi
         info "Trying $iface..."
         flush_ipv4_on_iface "$iface"
         sudo ip addr add "$laptop_ip" dev "$iface"

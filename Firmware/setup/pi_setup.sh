@@ -207,7 +207,7 @@ fi
 CHRONY_CONF_SRC="$EWEGO_DIR/Firmware/setup/chrony.conf"
 CHRONY_CONF_DST="/etc/chrony/chrony.conf"
 
-if [ ! -f "$CHRONY_CONF_SRC"]; then
+if [ ! -f "$CHRONY_CONF_SRC" ]; then
     warn "chrony.conf not found at $CHRONY_CONF_SRC - skipping chrony configurations"
     warn "Place chrony.conf in Firmware/setup/ and re-run to configure"
 else
@@ -224,7 +224,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 7. /boot/firmware/config.txt (hardware overlays)
+# 8. /boot/firmware/config.txt (hardware overlays)
 # --------------------------------------------------------------------------
 CONFIG="/boot/firmware/config.txt"
 info "Configuring $CONFIG..."
@@ -306,7 +306,7 @@ EOF
 fi
 
 # --------------------------------------------------------------------------
-# 8. Summary
+# 9. Summary
 # --------------------------------------------------------------------------
 echo ""
 echo "============================================================================"
@@ -338,7 +338,7 @@ echo "==========================================================================
 echo ""
 
 # --------------------------------------------------------------------------
-# 9. Optional: chain into mesh setup
+# 10. Optional: chain into mesh setup
 # --------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MESH_SETUP="${SCRIPT_DIR}/mesh_setup.sh"
