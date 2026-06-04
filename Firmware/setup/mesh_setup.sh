@@ -147,6 +147,7 @@ Wants=network-pre.target
 Type=oneshot
 RemainAfterExit=yes
 ExecStart=/usr/local/bin/ewego-mesh-start.sh
+ExecStartPost=-/bin/systemctl try-restart chrony
 ExecStop=/usr/bin/ip link set bat0 down
 
 [Install]

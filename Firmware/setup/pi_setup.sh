@@ -220,7 +220,7 @@ else
     sudo systemctl enable chrony
     sudo systemctl restart chrony
 
-    info "Chrony configured (GPS PPS on GPIO 18 via /dev/pps0)"
+    info "Chrony configured (GPS PPS on GPIO 6 via /dev/pps0, mesh peers 10.42.0.1-16, internet fallback)"
 fi
 
 # --------------------------------------------------------------------------
@@ -288,6 +288,10 @@ dtoverlay=googlevoicehat-soundcard
 dtoverlay=uart3
 dtoverlay=uart4
 
+# GPS PPS time pulse (GPIO 6 = TIMEPULSE output from ZED-X20P, per EweGo carrier board)
+# Harmless if PPS is not physically wired — /dev/pps0 simply won't appear.
+dtoverlay=pps-gpio,gpiopin=6
+
 # IMU UART5 configuration
 dtoverlay=uart5
 
@@ -316,6 +320,7 @@ echo ""
 echo " What was configured:"
 echo "   - Hostname: ewe${DEVICE_NUM}"
 echo "   - USB-C SSH: usb0 = 10.55.${DEVICE_NUM}.1/24 (plug USB-C to laptop)"
+echo "   - chrony: GPS PPS (GPIO 6) > mesh peers 10.42.0.1-16 > internet fallback"
 echo "   - python3-picamera2, i2c-tools, python3-smbus2 installed via apt"
 echo "   - uv + Python venv with pyserial, pyubx2"
 echo "   - i2c-dev + dwc2/g_ether kernel modules on boot"
