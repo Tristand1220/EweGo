@@ -288,7 +288,7 @@ def run_continuous_monitoring(fg, duration=30, interval=2, log_file=None):
 
             # Write header if file is new/empty
             if file_handle.tell() == 0:
-                csv_writer.writerow(['timestamp_us', 'elapsed_s', 'Voltage_V', 'SOC_Percent', 'Alert'])
+                csv_writer.writerow(['monotonic_us', 'elapsed_s', 'Voltage_V', 'SOC_Percent', 'Alert'])
                 file_handle.flush()
 
             print(f"✓ Logging to: {log_file}")
