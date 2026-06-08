@@ -28,16 +28,15 @@ EweGo/
 - Hardware H.264 encoder, 12 Mbps per camera, 1920x1080 @ 24fps
 - 24fps is the max stutter-free rate (CM4 has a single shared encoder block)
 - 30fps causes ~23% frame doubling; 20fps and 24fps have 0% drops
-- Timestamps: epoch-aligned via `time.monotonic_ns()` offset on first frame
+- Timestamps: raw picamera2 values, µs since boot (64-bit kernel monotonic clock)
 - Binary format: little-endian int64 (`<q`), microseconds
-- Has wraparound detection for camera STC counter resets in long recordings
 - Unbuffered writes (`buffering=0`) for timestamp persistence on power loss
 
 ### Player (`Firmware/dualcam/play_with_timestamps.py`)
 - Auto-detects .h264 vs .mjpeg (legacy)
 - Remuxes to seekable containers via ffmpeg (cached)
 - `build_sync_map()` pairs cam1/cam2 frames by closest timestamp
-- Repairs timestamp wraparounds and strips trailing zero-padding on load
+- Strips trailing zero-padding on load (guard against None timestamp on final frame)
 - Run from recording dir: `uv run python /path/to/play_with_timestamps.py`
 
 ### Sensor Test Orchestrator (`Firmware/sensor_test.py`)
@@ -91,8 +90,6 @@ EweGo/
   netplan configs to 0 bytes, killing network. `pi_setup.sh` now writes WiFi
   config directly to `/etc/NetworkManager/system-connections/` to avoid this.
   Fix for existing broken installs: `Firmware/bugs/fix_sd_power_loss.sh`
-- **Timestamp wraparound**: Camera STC counter can reset to 0 in very long recordings
-  (~3+ hours). Recorder and player both handle this now.
 
 ### Deployment
 - Deploy to Pi: `bash Firmware/setup/deploy.sh [user@]ewe1.local`

@@ -15,10 +15,10 @@ import numpy as np
 
 
 def load_timestamps(timestamp_file):
-    """Load timestamps from binary file (64-bit little-endian integers in microseconds).
+    """Load timestamps from binary file.
 
-    Detects and repairs timestamp wraparounds from long recordings where the
-    camera's STC counter reset to 0 mid-recording.
+    Format: 64-bit little-endian integers, µs since boot (kernel monotonic clock).
+    Both cameras use the same clock so their values are directly comparable.
     """
     raw = []
     with open(timestamp_file, 'rb') as f:
@@ -28,23 +28,10 @@ def load_timestamps(timestamp_file):
                 break
             raw.append(struct.unpack('<q', data)[0])
 
-    # Strip trailing zeros (unused pre-allocated buffer entries)
+    # Strip trailing zeros — can occur if the encoder sends a None timestamp
+    # on the final frame during shutdown (written as 0 by the recorder).
     while raw and raw[-1] == 0:
         raw.pop()
-
-    # Repair wraparounds: if a timestamp jumps backwards by > 1 second,
-    # the camera's STC counter wrapped. Accumulate an offset so all
-    # subsequent timestamps stay monotonic.
-    wrap_offset = 0
-    for i in range(1, len(raw)):
-        adjusted = raw[i] + wrap_offset
-        prev = raw[i - 1]
-        if adjusted < prev - 1_000_000:
-            gap = prev - adjusted
-            wrap_offset += gap
-            adjusted += gap
-            print(f"  Repaired timestamp wrap at frame {i} (shifted +{gap / 1e6:.1f}s)")
-        raw[i] = adjusted
 
     return raw
 

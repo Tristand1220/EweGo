@@ -67,12 +67,9 @@ class RawTimestampOutput(FileOutput):
     def __init__(self, video_file, timestamp_file, camera_id):
         super().__init__(video_file)
         self.camera_id = camera_id
-        self.ts_file = open(timestamp_file, "wb", buffering=0)  # Unbuffered binary write
+        self.ts_file = open(timestamp_file, "wb", buffering=0)  # Unbuffered: survives power loss
         self.last_ts = None
         self.count = 0
-        self.epoch_offset = None  # Set on first frame
-        self.last_raw_ts = None   # Track raw camera timestamp for wraparound detection
-        self.wrap_offset = 0      # Accumulated offset from timestamp wraparounds
 
         # Stats tracking (guarded by _lock)
         self._lock = threading.Lock()
@@ -82,36 +79,16 @@ class RawTimestampOutput(FileOutput):
         self.interval_max = 0
 
     def outputframe(self, frame, keyframe=True, timestamp=None, packet=None, audio=None):
-        raw_ts = timestamp or 0
+        # picamera2 timestamps are 64-bit µs since boot (kernel monotonic clock).
+        # Both cameras share this clock, so their timestamps are directly comparable.
+        ts_us = timestamp or 0
 
-        # Detect timestamp wraparound: camera STC counter can reset to 0
-        # after extended recording (~3 hours). When the raw timestamp jumps
-        # backwards by more than 1 second, accumulate the previous value
-        # so aligned timestamps stay monotonic.
-        if self.last_raw_ts is not None and raw_ts < self.last_raw_ts - 1_000_000:
-            self.wrap_offset += self.last_raw_ts
-            print(f"CAM{self.camera_id}: timestamp wrap detected at frame {self.count}, "
-                  f"adding {self.last_raw_ts / 1e6:.1f}s offset")
-        self.last_raw_ts = raw_ts
-
-        corrected_ts = raw_ts + self.wrap_offset
-
-        # On first frame, record the mapping from camera-relative timestamp
-        # to system monotonic clock so we can align cameras later.
-        if self.epoch_offset is None:
-            sys_us = time.monotonic_ns() // 1000
-            self.epoch_offset = sys_us - corrected_ts
-
-        # Convert to seconds (float64) for interval computation
-        ts = corrected_ts / 1e6
-
-        # Write epoch-aligned timestamp (corrected camera ts + offset) so both
-        # cameras share the same time base.
-        aligned_ts = corrected_ts + self.epoch_offset
-        self.ts_file.write(struct.pack("<q", aligned_ts))
+        self.ts_file.write(struct.pack("<q", ts_us))
         self.count += 1
 
-        # Calculate interval for stats
+        # Convert to seconds for interval stats
+        ts = ts_us / 1e6
+
         if self.last_ts is not None:
             interval = (ts - self.last_ts) * 1000  # ms
             with self._lock:
@@ -124,7 +101,6 @@ class RawTimestampOutput(FileOutput):
 
         self.last_ts = ts
 
-        # Write frame to video output
         return super().outputframe(frame, keyframe, timestamp, packet, audio)
 
     def get_stats(self):
