@@ -15,6 +15,7 @@ import signal
 import sys
 import time
 import os
+import csv
 from pathlib import Path
 from datetime import datetime
 import threading
@@ -48,6 +49,30 @@ class BatteryLifeTest:
         print("\n\n[SIGNAL] Shutdown requested...")
         self.stop_all()
         sys.exit(0)
+
+    def _clock_sync_worker(self, out_path):
+        """Write (monotonic_us, wall_time_s) pairs at 10 ms intervals.
+
+        monotonic_us: time.monotonic_ns() // 1000 — unaffected by NTP, same
+          clock domain as camera timestamps and all other sensor timestamps.
+        wall_time_s:  time.time() — chrony-disciplined wall clock.
+
+        Together these let post-processing convert any monotonic timestamp to
+        wall time and correlate events across devices via chrony-synced wall time.
+        """
+        interval_s = 0.01  # 10 ms = 100 Hz
+        with open(out_path, "w", newline="", buffering=1) as f:
+            writer = csv.writer(f)
+            writer.writerow(["monotonic_us", "wall_time_s"])
+            next_tick = time.monotonic()
+            while self.running:
+                mono = time.monotonic_ns() // 1000
+                wall = time.time()
+                writer.writerow([mono, f"{wall:.6f}"])
+                next_tick += interval_s
+                sleep_s = next_tick - time.monotonic()
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
 
     def start_imu_logger(self, max_retries=3):
         """Start IMU data logger with retries (backup to IMU's internal retry)"""
@@ -309,6 +334,14 @@ finally:
 
         self.running = True
 
+        # Start clock-sync logger before any sensor so the log spans the
+        # full session including sensor startup.
+        threading.Thread(
+            target=self._clock_sync_worker,
+            args=(self.log_dir / "clock_sync.csv",),
+            daemon=True,
+        ).start()
+
         try:
             # Start cameras first — they take longest to initialize and
             # their init interferes with the IMU's UART.
@@ -390,6 +423,7 @@ finally:
         print("=" * 70)
         print(f"\nAll data saved to: {self.log_dir}/")
         print("\nSummary:")
+        print("  - Clock sync: " + str(self.log_dir / "clock_sync.csv"))
         print("  - IMU logs: " + str(self.log_dir / "imu/"))
         print("  - Audio: " + str(self.log_dir / f"audio_{self.session}.wav"))
         print("  - Camera: " + str(self.log_dir / "camera/"))

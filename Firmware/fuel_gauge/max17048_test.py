@@ -288,7 +288,7 @@ def run_continuous_monitoring(fg, duration=30, interval=2, log_file=None):
 
             # Write header if file is new/empty
             if file_handle.tell() == 0:
-                csv_writer.writerow(['Timestamp', 'Datetime', 'Elapsed_Seconds', 'Voltage_V', 'SOC_Percent', 'Alert'])
+                csv_writer.writerow(['timestamp_us', 'elapsed_s', 'Voltage_V', 'SOC_Percent', 'Alert'])
                 file_handle.flush()
 
             print(f"✓ Logging to: {log_file}")
@@ -303,38 +303,35 @@ def run_continuous_monitoring(fg, duration=30, interval=2, log_file=None):
     print("Time(s)  Voltage(V)  SOC(%)   Alert")
     print("-" * 60)
 
-    start_time = time.time()
+    start_us = time.monotonic_ns() // 1000
     reading_count = 0
 
     try:
-        while (time.time() - start_time) < duration:
-            elapsed = time.time() - start_time
+        while (time.monotonic_ns() // 1000 - start_us) < duration * 1_000_000:
+            now_us = time.monotonic_ns() // 1000
+            elapsed_s = (now_us - start_us) / 1e6
             voltage = fg.get_vcell()
             soc = fg.get_soc()
             alert = fg.is_alert_active()
 
             if voltage is not None and soc is not None:
                 alert_str = "YES" if alert else "NO"
-                print(f"{elapsed:6.1f}   {voltage:6.3f}      {soc:5.2f}    {alert_str}")
+                print(f"{elapsed_s:6.1f}   {voltage:6.3f}      {soc:5.2f}    {alert_str}")
                 reading_count += 1
 
                 # Log to file if enabled
                 if csv_writer:
                     try:
-                        timestamp = time.time()
-                        datetime_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                        csv_writer.writerow([timestamp, datetime_str, f"{elapsed:.2f}",
+                        csv_writer.writerow([now_us, f"{elapsed_s:.2f}",
                                            f"{voltage:.4f}", f"{soc:.3f}", alert_str])
                         file_handle.flush()  # Flush immediately for crash robustness
                     except Exception as e:
                         print(f"✗ Error writing to log: {e}")
             else:
-                print(f"{elapsed:6.1f}   ERROR reading sensor")
+                print(f"{elapsed_s:6.1f}   ERROR reading sensor")
                 if csv_writer:
                     try:
-                        timestamp = time.time()
-                        datetime_str = datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f')[:-3]
-                        csv_writer.writerow([timestamp, datetime_str, f"{elapsed:.2f}",
+                        csv_writer.writerow([now_us, f"{elapsed_s:.2f}",
                                            'ERROR', 'ERROR', 'ERROR'])
                         file_handle.flush()
                     except Exception as e:

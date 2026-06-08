@@ -28,8 +28,9 @@ class TimeSync:
         self.sync_file = open(self.sync_filename, 'w', newline='')
         self.csv_writer = csv.writer(self.sync_file)
         self.csv_writer.writerow([
-            'system_time',
-            'gps_time', 
+            'system_time_us',
+            'wall_time_s',
+            'gps_time',
             'gps_week',
             'gps_tow',
             'offset_seconds',
@@ -37,13 +38,14 @@ class TimeSync:
         ])
         print(f"✓ Time sync logging to: {self.sync_filename}")
         
-    def log(self, system_time, gps_datetime, gps_week, gps_tow, num_sv):
+    def log(self, system_time_us, wall_time_s, gps_datetime, gps_week, gps_tow, num_sv):
         """Log time correlation"""
         if self.csv_writer:
             gps_timestamp = gps_datetime.timestamp()
-            offset = system_time - gps_timestamp
+            offset = wall_time_s - gps_timestamp
             self.csv_writer.writerow([
-                f"{system_time:.6f}",
+                system_time_us,
+                f"{wall_time_s:.6f}",
                 gps_datetime.isoformat(),
                 gps_week,
                 f"{gps_tow:.3f}",
@@ -148,7 +150,7 @@ class GPSLogger:
         
         # Time synchronization
         self.timesync = TimeSync(self.log_filename_base)
-        self.last_timesync_log = 0
+        self.last_timesync_log_us = 0
         
         # Statistics
         self.stats = {
@@ -253,8 +255,9 @@ class GPSLogger:
         
         while self.running:
             try:
-                # Record system time
-                system_time = time.time()
+                # Record both clocks back-to-back to minimize inter-capture jitter
+                system_time_us = time.monotonic_ns() // 1000
+                wall_time_s = time.time()
                 
                 # Check serial buffer usage (if supported)
                 try:
@@ -287,7 +290,7 @@ class GPSLogger:
                         self.stats['last_carr_soln'] = getattr(parsed_msg, 'carrSoln', 0)
                         
                         # Log time synchronization every 10 seconds
-                        if system_time - self.last_timesync_log >= 10.0:
+                        if system_time_us - self.last_timesync_log_us >= 10_000_000:
                             try:
                                 gps_datetime = datetime(
                                     parsed_msg.year, parsed_msg.month, parsed_msg.day,
@@ -304,18 +307,19 @@ class GPSLogger:
                                 
                                 # Log correlation
                                 self.timesync.log(
-                                    system_time,
+                                    system_time_us,
+                                    wall_time_s,
                                     gps_datetime,
                                     gps_week,
                                     gps_tow,
                                     parsed_msg.numSV
                                 )
-                                
+
                                 # Calculate offset for display
                                 gps_timestamp = gps_datetime.timestamp()
-                                self.stats['time_offset'] = system_time - gps_timestamp
-                                
-                                self.last_timesync_log = system_time
+                                self.stats['time_offset'] = wall_time_s - gps_timestamp
+
+                                self.last_timesync_log_us = system_time_us
                             except:
                                 pass
                     elif not parsed_msg:

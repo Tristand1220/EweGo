@@ -7,6 +7,7 @@ Records audio from the default microphone and saves to a WAV file
 import subprocess
 import sys
 import signal
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -50,6 +51,11 @@ def record_audio(filename=None, duration=None, device=None):
         print(f"Duration: {duration} seconds")
     else:
         print("Press Ctrl+C to stop recording")
+
+    # Write monotonic start time so post-processing can align audio samples
+    # with other sensors: sample_time_us = start_us + int(sample_idx / RATE * 1e6)
+    start_us = time.monotonic_ns() // 1000
+    Path(filename).with_suffix('.start_us').write_text(str(start_us))
 
     try:
         # Run arecord

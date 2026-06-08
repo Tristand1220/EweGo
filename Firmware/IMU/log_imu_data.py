@@ -437,7 +437,7 @@ class IMULogger:
 
         # Write header
         self.csv_writer.writerow([
-            'timestamp',
+            'timestamp_us',
             'heading_deg', 'roll_deg', 'pitch_deg',
             'quat_w', 'quat_x', 'quat_y', 'quat_z',
             'lin_accel_x', 'lin_accel_y', 'lin_accel_z',
@@ -493,8 +493,8 @@ class IMULogger:
                 loop_start = time.monotonic()
 
                 try:
-                    # Get timestamp
-                    timestamp = datetime.now().isoformat()
+                    # Get timestamp (µs since boot, same clock as camera)
+                    timestamp_us = time.monotonic_ns() // 1000
 
                     # Read all sensor data
                     euler = self.sensor.get_euler()
@@ -525,7 +525,7 @@ class IMULogger:
 
                     # Write to CSV
                     self.csv_writer.writerow([
-                        timestamp,
+                        timestamp_us,
                         euler.heading, euler.roll, euler.pitch,
                         quat.w, quat.x, quat.y, quat.z,
                         lin_accel.x, lin_accel.y, lin_accel.z,
