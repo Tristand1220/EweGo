@@ -29,7 +29,6 @@ class TimeSync:
         self.csv_writer = csv.writer(self.sync_file)
         self.csv_writer.writerow([
             'system_time_us',
-            'wall_time_s',
             'gps_time',
             'gps_week',
             'gps_tow',
@@ -45,7 +44,6 @@ class TimeSync:
             offset = wall_time_s - gps_timestamp
             self.csv_writer.writerow([
                 system_time_us,
-                f"{wall_time_s:.6f}",
                 gps_datetime.isoformat(),
                 gps_week,
                 f"{gps_tow:.3f}",

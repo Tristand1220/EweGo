@@ -29,8 +29,7 @@ def record_audio(filename=None, duration=None, device=None):
 
     def callback(indata, frames, time_info, status):
         mono_us = time.monotonic_ns() // 1000
-        wall_s = time.time()
-        audio_q.put((indata.copy(), mono_us, wall_s))
+        audio_q.put((indata.copy(), mono_us))
 
     stream_kwargs = dict(
         samplerate=RATE,
@@ -62,18 +61,18 @@ def record_audio(filename=None, duration=None, device=None):
             wav_f.setframerate(RATE)
 
             ts_writer = csv.writer(ts_f, lineterminator='\n')
-            ts_writer.writerow(['monotonic_us', 'wall_time_s', 'sample_index'])
+            ts_writer.writerow(['monotonic_us', 'sample_index'])
 
             with sd.InputStream(**stream_kwargs):
                 while True:
                     if end_mono and time.monotonic() >= end_mono:
                         break
                     try:
-                        chunk, mono_us, wall_s = audio_q.get(timeout=0.5)
+                        chunk, mono_us = audio_q.get(timeout=0.5)
                     except queue.Empty:
                         continue
                     wav_f.writeframes(chunk.tobytes())
-                    ts_writer.writerow([mono_us, f"{wall_s:.6f}", total_frames])
+                    ts_writer.writerow([mono_us, total_frames])
                     total_frames += BLOCKSIZE
 
     except KeyboardInterrupt:
