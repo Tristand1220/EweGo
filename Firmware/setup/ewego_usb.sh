@@ -76,6 +76,23 @@ parse_device_num() {
     return 1
 }
 
+# Probe the identity of a Pi on a USB iface via mDNS (avahi).
+# Prints "N hostname" (e.g. "7 ewego007") on success, returns 1 if not found.
+probe_iface_identity() {
+    local iface="$1"
+    command -v avahi-browse &>/dev/null || return 1
+    local name
+    name=$(avahi-browse _workstation._tcp -t -r -p 2>/dev/null | \
+        awk -F';' -v iface="$iface" '
+            $1 == "=" && $2 == iface {
+                split($4, a, " "); print a[1]; exit
+            }')
+    [ -z "$name" ] && return 1
+    local n
+    n=$(parse_device_num "$name") || return 1
+    echo "$n $name"
+}
+
 # Remove all IPv4 addresses from an iface. Used before assigning a new one.
 flush_ipv4_on_iface() {
     local iface="$1"
@@ -114,7 +131,15 @@ cmd_list() {
         elif [ -n "$addr" ]; then
             printf "  %-22s  %s  ${YELLOW}[non-EweGo subnet — run 'up <N>' to reconfigure]${NC}\n" "$iface" "$addr"
         else
-            printf "  %-22s  no IP  ${YELLOW}[run 'up <N>' to configure]${NC}\n" "$iface"
+            local identity
+            if identity=$(probe_iface_identity "$iface"); then
+                local disc_n="${identity%% *}"
+                local disc_name="${identity#* }"
+                printf "  %-22s  no IP  →  %s (Pi #%d)  ${YELLOW}[run 'up %d' to configure]${NC}\n" \
+                    "$iface" "$disc_name" "$disc_n" "$disc_n"
+            else
+                printf "  %-22s  no IP  ${YELLOW}[run 'up <N>' or 'up auto' to configure]${NC}\n" "$iface"
+            fi
         fi
     done
     if [ "$found" = 0 ]; then
@@ -122,6 +147,36 @@ cmd_list() {
         echo ""
         echo "  Check that the USB-C cable is plugged in and the Pi is booted."
     fi
+}
+
+cmd_up_auto() {
+    command -v avahi-browse &>/dev/null || { error "'up auto' requires avahi-browse (sudo pacman -S avahi)"; exit 1; }
+    sudo -v
+    local found=0
+    for iface in $(find_usb_ifaces); do
+        local cur
+        cur=$(ip -4 -br addr show "$iface" 2>/dev/null | awk '{print $3}')
+        # Skip ifaces already configured for an EweGo Pi that responds
+        if [[ "$cur" =~ ^10\.55\.([0-9]+)\.100/24$ ]]; then
+            local existing_n="${BASH_REMATCH[1]}"
+            if ping -c1 -W1 "10.55.${existing_n}.1" >/dev/null 2>&1; then
+                info "$iface already configured for Pi #$existing_n"
+                found=$((found + 1))
+                continue
+            fi
+        fi
+        local identity
+        if identity=$(probe_iface_identity "$iface"); then
+            local n="${identity%% *}"
+            local name="${identity#* }"
+            info "Discovered $name (Pi #$n) on $iface — configuring..."
+            cmd_up "$n"
+            found=$((found + 1))
+        else
+            warn "$iface: no Pi identity found via mDNS — try 'up <N>' manually"
+        fi
+    done
+    [ "$found" -eq 0 ] && warn "No EweGo Pis discovered" || true
 }
 
 cmd_up() {
@@ -272,8 +327,8 @@ case "$ACTION" in
         cmd_list
         ;;
     up)
-        [ $# -lt 2 ] && { error "Usage: $0 up <N|hostname>"; exit 1; }
-        cmd_up "$2"
+        [ $# -lt 2 ] && { error "Usage: $0 up <N|hostname|auto>"; exit 1; }
+        if [ "$2" = "auto" ]; then cmd_up_auto; else cmd_up "$2"; fi
         ;;
     down)
         [ $# -lt 2 ] && { error "Usage: $0 down <N|hostname>"; exit 1; }
@@ -289,7 +344,7 @@ case "$ACTION" in
         ;;
     *)
         error "Unknown action: $ACTION"
-        echo "Usage: bash $0 [list|up|down|ssh|nat] [N|hostname]"
+        echo "Usage: bash $0 [list|up|down|ssh|nat] [N|hostname|auto]"
         exit 1
         ;;
 esac
