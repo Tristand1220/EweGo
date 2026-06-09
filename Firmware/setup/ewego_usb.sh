@@ -168,8 +168,8 @@ cmd_up() {
         info "Trying $iface..."
         flush_ipv4_on_iface "$iface"
         sudo ip addr add "$laptop_ip" dev "$iface"
-        sleep 0.5
-        if ping -c2 -W1 "$pi_ip" >/dev/null 2>&1; then
+        sleep 2  # USB gadget needs time to be ready after link-up or reboot
+        if ping -c3 -W2 "$pi_ip" >/dev/null 2>&1; then
             info "Found Pi #$n on $iface"
             echo "  Laptop: ${laptop_ip%/*}    Pi: $pi_ip"
             echo "  SSH:    ssh ${REMOTE_USER}@${pi_ip}"
@@ -214,6 +214,57 @@ cmd_ssh() {
     exec ssh "${REMOTE_USER}@10.55.${n}.1"
 }
 
+# Share the laptop's internet connection to a Pi over USB.
+# Enables IP forwarding and adds iptables MASQUERADE on the outbound iface.
+# Also sets the default route on the Pi so it sends traffic through the laptop.
+cmd_nat() {
+    local target="$1"
+    local n
+    n=$(parse_device_num "$target") || { error "Can't parse device number from '$target'"; exit 1; }
+    local pi_ip="10.55.${n}.1"
+    local laptop_usb_ip="10.55.${n}.100"
+
+    # Find the USB iface that holds this Pi's subnet
+    local usb_iface=""
+    for iface in $(find_usb_ifaces); do
+        if ip -4 -br addr show "$iface" 2>/dev/null | grep -q "10.55.${n}.100"; then
+            usb_iface="$iface"
+            break
+        fi
+    done
+    if [ -z "$usb_iface" ]; then
+        error "Pi #$n not configured — run 'up $n' first"
+        exit 1
+    fi
+
+    # Find the laptop's outbound (internet) interface
+    local out_iface
+    out_iface=$(ip route show default | awk '/default/{print $5; exit}')
+    if [ -z "$out_iface" ]; then
+        error "No default route found on laptop — no internet to share"
+        exit 1
+    fi
+
+    sudo -v
+    info "Enabling IP forwarding..."
+    sudo sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+    info "Adding NAT rule: $usb_iface → $out_iface..."
+    sudo iptables -t nat -C POSTROUTING -o "$out_iface" -j MASQUERADE 2>/dev/null || \
+        sudo iptables -t nat -A POSTROUTING -o "$out_iface" -j MASQUERADE
+    sudo iptables -C FORWARD -i "$usb_iface" -o "$out_iface" -j ACCEPT 2>/dev/null || \
+        sudo iptables -A FORWARD -i "$usb_iface" -o "$out_iface" -j ACCEPT
+    sudo iptables -C FORWARD -i "$out_iface" -o "$usb_iface" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \
+        sudo iptables -A FORWARD -i "$out_iface" -o "$usb_iface" -m state --state RELATED,ESTABLISHED -j ACCEPT
+
+    info "Setting default route on Pi #$n via laptop ($laptop_usb_ip)..."
+    ssh -o BatchMode=yes -o ConnectTimeout=5 "${REMOTE_USER}@${pi_ip}" \
+        "sudo ip route replace default via ${laptop_usb_ip} && echo 'Route set'"
+
+    info "Internet sharing active: Pi #$n → $usb_iface → $out_iface"
+    info "Test with: ssh ${REMOTE_USER}@${pi_ip} 'curl -s --max-time 5 https://deb.debian.org > /dev/null && echo ok'"
+}
+
 # --------------------------------------------------------------------------
 ACTION="${1:-list}"
 case "$ACTION" in
@@ -232,9 +283,13 @@ case "$ACTION" in
         [ $# -lt 2 ] && { error "Usage: $0 ssh <N|hostname>"; exit 1; }
         cmd_ssh "$2"
         ;;
+    nat)
+        [ $# -lt 2 ] && { error "Usage: $0 nat <N|hostname>"; exit 1; }
+        cmd_nat "$2"
+        ;;
     *)
         error "Unknown action: $ACTION"
-        echo "Usage: bash $0 [list|up|down|ssh] [N|hostname]"
+        echo "Usage: bash $0 [list|up|down|ssh|nat] [N|hostname]"
         exit 1
         ;;
 esac

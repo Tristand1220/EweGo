@@ -53,7 +53,14 @@ sudo sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.
 sudo sed -i 's|http://archive.raspberrypi.com|https://archive.raspberrypi.com|g' /etc/apt/sources.list.d/raspi.sources 2>/dev/null || true
 
 info "Updating package index..."
-sudo apt update
+sudo apt update || warn "apt update failed (no internet?) — continuing with cached indexes"
+
+# systemd-timesyncd conflicts with chrony (both provide time-daemon).
+# Remove it first so the chrony install doesn't fail.
+if dpkg -l systemd-timesyncd 2>/dev/null | grep -q '^ii'; then
+    info "Removing systemd-timesyncd (conflicts with chrony)..."
+    sudo apt-get remove -y --purge systemd-timesyncd
+fi
 
 info "Installing system packages..."
 sudo apt install -y --no-install-recommends \
@@ -216,11 +223,17 @@ else
     sudo chown root:root "$CHRONY_CONF_DST"
     sudo chmod 644 "$CHRONY_CONF_DST"
 
-    info "Enabling and restarting chrony service..."
+    info "Enabling chrony service..."
     sudo systemctl enable chrony
-    sudo systemctl restart chrony
 
-    info "Chrony configured (GPS PPS on GPIO 6 via /dev/pps0, mesh peers 10.42.0.1-16, internet fallback)"
+    info "Starting chrony service..."
+    # /dev/pps0 won't exist until after first reboot (pps-gpio overlay).
+    # Chrony may fail to start here — that's expected; it will start cleanly after reboot.
+    if ! sudo systemctl restart chrony 2>&1; then
+        warn "chrony failed to start (likely /dev/pps0 not yet available — will start after reboot)"
+    else
+        info "Chrony configured (GPS PPS on GPIO 6 via /dev/pps0, mesh peers 10.42.0.1-16, internet fallback)"
+    fi
 fi
 
 # --------------------------------------------------------------------------
