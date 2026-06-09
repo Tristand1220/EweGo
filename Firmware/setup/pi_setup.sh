@@ -223,14 +223,28 @@ else
     sudo chown root:root "$CHRONY_CONF_DST"
     sudo chmod 644 "$CHRONY_CONF_DST"
 
+    # GPS/PPS refclocks require /dev/pps0 (pps-gpio overlay, active after first reboot).
+    # Install them into sources.d only when the device already exists so chrony
+    # doesn't fatal-error on first boot.
+    GPS_CONF_SRC="$EWEGO_DIR/Firmware/setup/chrony-gps.conf"
+    GPS_CONF_DST="/etc/chrony/sources.d/gps.conf"
+    sudo mkdir -p /etc/chrony/sources.d
+    if [ -e /dev/pps0 ]; then
+        info "PPS device found — installing GPS/PPS refclocks..."
+        sudo cp "$GPS_CONF_SRC" "$GPS_CONF_DST"
+        sudo chown root:root "$GPS_CONF_DST"
+        sudo chmod 644 "$GPS_CONF_DST"
+    else
+        sudo rm -f "$GPS_CONF_DST"
+        warn "No /dev/pps0 yet — GPS/PPS sources will be enabled after reboot"
+    fi
+
     info "Enabling chrony service..."
     sudo systemctl enable chrony
 
     info "Starting chrony service..."
-    # /dev/pps0 won't exist until after first reboot (pps-gpio overlay).
-    # Chrony may fail to start here — that's expected; it will start cleanly after reboot.
     if ! sudo systemctl restart chrony 2>&1; then
-        warn "chrony failed to start (likely /dev/pps0 not yet available — will start after reboot)"
+        warn "chrony failed to start — check: journalctl -u chrony"
     else
         info "Chrony configured (GPS PPS on GPIO 6 via /dev/pps0, mesh peers 10.42.0.1-16, internet fallback)"
     fi
