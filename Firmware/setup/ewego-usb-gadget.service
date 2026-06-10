@@ -1,0 +1,13 @@
+[Unit]
+Description=EweGo USB NCM gadget (configfs)
+After=sys-kernel-config.mount systemd-modules-load.service
+DefaultDependencies=no
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/usb_gadget_ncm.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

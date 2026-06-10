@@ -18,8 +18,8 @@ EweGo/
 │   └── sensor_test.py  # Unified orchestrator (runs all sensors)
 ├── Hardware/           # KiCad PCB design (submodule: eweSAW)
 ├── sensor_test_*/      # Recording output directories (gitignored)
-├── pyproject.toml      # Python deps (opencv, pyserial, pyubx2)
-└── requirements.txt    # Pip-compatible requirements
+├── pyproject.toml      # Python deps (pyserial, pyubx2, numpy, sounddevice; opencv as dev extra)
+└── uv.lock             # Pinned lock — single source of truth, deployed to Pi (uv sync --frozen)
 ```
 
 ## Key Technical Details
@@ -77,7 +77,11 @@ EweGo/
   - `up N`: assign `10.55.N.100/24`; with multiple USB ifaces, tries each
     until one's Pi responds at `10.55.N.1`
   - `ssh N`: assign IP if needed, then ssh to `user@10.55.N.1`
-- USB gadget configured in `pi_setup.sh` section 6 (dwc2 + g_ether)
+- NCM gadget (configfs, `usb_gadget_ncm.sh` + `ewego-usb-gadget.service`),
+  installed by `pi_setup.sh` section 6 — replaced g_ether/ECM, whose host-side
+  `cdc_ether` driver TX-stalls on newer laptop kernels
+- The gadget service assigns the usb0 IP (NM unmanages usb0 — a NM profile
+  racing the static IP caused flapping)
 - Config.txt booby-traps auto-handled: `otg_mode=1`, `dr_mode=host`, and bare
   `dtoverlay=dwc2` are detected and corrected to `dr_mode=peripheral`
 - Cloud-init `preserve_hostname` is flipped to `true` when pi_setup.sh renames

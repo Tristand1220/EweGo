@@ -81,14 +81,16 @@ install_mesh() {
     # Remove old 802.11s mesh profile if present (from previous setup attempts)
     sudo rm -f /etc/NetworkManager/system-connections/ewego-mesh.nmconnection
 
-    # Tell NetworkManager to leave wlan0 alone (we manage it via systemd)
-    if [ ! -f "$NM_UNMANAGED" ]; then
-        info "Configuring NetworkManager to ignore wlan0..."
+    # Tell NetworkManager to leave wlan0 (mesh) and usb0 (USB-C gadget) alone.
+    # Both are managed by their own systemd services (ewego-mesh,
+    # ewego-usb-gadget). Always reconcile — older deploys wrote wlan0-only,
+    # and NM racing the gadget's static IP on usb0 causes it to flap.
+    NM_UNMANAGED_WANT='[keyfile]
+unmanaged-devices=interface-name:wlan0;interface-name:usb0'
+    if [ ! -f "$NM_UNMANAGED" ] || ! diff -q <(echo "$NM_UNMANAGED_WANT") "$NM_UNMANAGED" >/dev/null 2>&1; then
+        info "Configuring NetworkManager to ignore wlan0 and usb0..."
         sudo mkdir -p /etc/NetworkManager/conf.d
-        sudo tee "$NM_UNMANAGED" > /dev/null <<'EOF'
-[keyfile]
-unmanaged-devices=interface-name:wlan0
-EOF
+        echo "$NM_UNMANAGED_WANT" | sudo tee "$NM_UNMANAGED" > /dev/null
     fi
 
     # --- Mesh startup script ---
