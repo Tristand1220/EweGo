@@ -216,3 +216,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# LaTeX build artifacts (commit .tex source only)
+Firmware/setup/ewego_network.pdf
