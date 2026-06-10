@@ -75,6 +75,7 @@ class NTRIPClient:
         """Connect to NTRIP caster"""
         try:
             self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.settimeout(5)
             self.socket.connect((self.host, self.port))
             
             # Build NTRIP request
@@ -479,16 +480,16 @@ def main():
     BAUDRATE = args.baud
     
     # NTRIP configuration (set to None to disable)
-    # NTRIP_CONFIG = None  # Disabled by default
-    
+    NTRIP_CONFIG = None  # Disabled by default
+
     # Sparkfun Mosaic Default Project Configuration Server Settings for NTRIP RTK corrections:
-    NTRIP_CONFIG = {
-        'host': '192.168.1.213',
-        'port': 2101,
-        'mountpoint': 'sheep',
-        'username': None,  # Or your username
-        'password': None   # Or your password
-    }
+    # NTRIP_CONFIG = {
+    #     'host': '192.168.1.213',
+    #     'port': 2101,
+    #     'mountpoint': 'sheep',
+    #     'username': None,  # Or your username
+    #     'password': None   # Or your password
+    # }
     
     # ===================================
     
