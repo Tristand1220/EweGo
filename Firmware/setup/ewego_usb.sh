@@ -76,18 +76,35 @@ parse_device_num() {
     return 1
 }
 
-# Probe the identity of a Pi on a USB iface via mDNS (avahi).
+# Probe the identity of a Pi on a USB iface via IPv6 link-local.
+# Works on unconfigured interfaces (no IPv4 needed — fe80 is auto-assigned).
 # Prints "N hostname" (e.g. "7 ewego007") on success, returns 1 if not found.
 probe_iface_identity() {
     local iface="$1"
-    command -v avahi-browse &>/dev/null || return 1
+
+    # Ensure link-local is up (interface must be UP even without IPv4)
+    sudo ip link set "$iface" up 2>/dev/null || true
+
+    # Solicit neighbor advertisements from all nodes on the link
+    ping6 -c2 -W1 "ff02::1%${iface}" >/dev/null 2>&1 || true
+
+    # Find a reachable fe80 neighbor (the Pi's link-local addr)
+    local remote
+    remote=$(ip -6 neigh show dev "$iface" 2>/dev/null | \
+        awk '/fe80.*REACHABLE|fe80.*STALE|fe80.*DELAY/{print $1; exit}')
+    [ -z "$remote" ] && return 1
+
+    # SSH via link-local to get hostname (scope ID required: addr%iface)
     local name
-    name=$(avahi-browse _workstation._tcp -t -r -p 2>/dev/null | \
-        awk -F';' -v iface="$iface" '
-            $1 == "=" && $2 == iface {
-                split($4, a, " "); print a[1]; exit
-            }')
+    name=$(ssh -o BatchMode=yes \
+               -o ConnectTimeout=3 \
+               -o StrictHostKeyChecking=no \
+               -o UserKnownHostsFile=/dev/null \
+               "${REMOTE_USER}@${remote}%${iface}" \
+               hostname 2>/dev/null) || return 1
+    name="${name%%.local}"   # strip .local suffix if present
     [ -z "$name" ] && return 1
+
     local n
     n=$(parse_device_num "$name") || return 1
     echo "$n $name"
@@ -138,7 +155,7 @@ cmd_list() {
                 printf "  %-22s  no IP  →  %s (Pi #%d)  ${YELLOW}[run 'up %d' to configure]${NC}\n" \
                     "$iface" "$disc_name" "$disc_n" "$disc_n"
             else
-                printf "  %-22s  no IP  ${YELLOW}[run 'up <N>' or 'up auto' to configure]${NC}\n" "$iface"
+                printf "  %-22s  no IP  ${YELLOW}[run 'up auto' or 'up <N>' to configure]${NC}\n" "$iface"
             fi
         fi
     done
@@ -150,7 +167,6 @@ cmd_list() {
 }
 
 cmd_up_auto() {
-    command -v avahi-browse &>/dev/null || { error "'up auto' requires avahi-browse (sudo pacman -S avahi)"; exit 1; }
     sudo -v
     local found=0
     for iface in $(find_usb_ifaces); do
@@ -313,8 +329,21 @@ cmd_nat() {
         sudo iptables -A FORWARD -i "$out_iface" -o "$usb_iface" -m state --state RELATED,ESTABLISHED -j ACCEPT
 
     info "Setting default route on Pi #$n via laptop ($laptop_usb_ip)..."
-    ssh -o BatchMode=yes -o ConnectTimeout=5 "${REMOTE_USER}@${pi_ip}" \
+    ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=5 "${REMOTE_USER}@${pi_ip}" \
         "sudo ip route replace default via ${laptop_usb_ip} && echo 'Route set'"
+
+    # The USB gadget link pushes no DNS, so name resolution fails even once
+    # routing works. Prefer resolvectl when resolv.conf is resolved-managed
+    # (a plain tee would be clobbered); fall back to writing resolv.conf.
+    info "Configuring DNS on Pi #$n..."
+    ssh -tt -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+        -o ConnectTimeout=5 "${REMOTE_USER}@${pi_ip}" \
+        "if command -v resolvectl >/dev/null && [ -L /etc/resolv.conf ]; then \
+             sudo resolvectl dns usb0 1.1.1.1 8.8.8.8 && echo 'DNS set (resolvectl)'; \
+         else \
+             printf 'nameserver 1.1.1.1\nnameserver 8.8.8.8\n' | sudo tee /etc/resolv.conf >/dev/null && echo 'DNS set (resolv.conf)'; \
+         fi"
 
     info "Internet sharing active: Pi #$n → $usb_iface → $out_iface"
     info "Test with: ssh ${REMOTE_USER}@${pi_ip} 'curl -s --max-time 5 https://deb.debian.org > /dev/null && echo ok'"

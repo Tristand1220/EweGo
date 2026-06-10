@@ -90,6 +90,7 @@ resolve_host() {
     return 1
 }
 
+info "Resolving $TARGET_HOST..."
 if ! TARGET_IP=$(resolve_host "$TARGET_HOST"); then
     error "Could not resolve '$TARGET_HOST' to an IP."
     echo "  Tried: getent ahosts $TARGET_HOST"
