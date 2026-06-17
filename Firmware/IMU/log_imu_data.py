@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 BNO055 IMU Data Logger for Raspberry Pi CM4
-Logs IMU data to CSV file at 50Hz
+Logs IMU data to CSV file. Default 100 Hz — the BNO055's fixed fusion-mode
+output data rate (NDOF), reachable via a single 46-byte block read per sample.
 
 Features:
-- 50Hz polling rate
+- 100 Hz polling rate (BNO055 fusion ceiling)
 - CSV logging with timestamps
 - Graceful shutdown on SIGINT/SIGTERM
 - Comprehensive sensor data capture
@@ -395,6 +396,44 @@ class BNO055:
         """Get temperature in degrees Celsius"""
         return self._read_byte(Register.TEMP)
 
+    def get_all(self):
+        """Read every logged field in ONE UART transaction.
+
+        Accel, mag, gyro, euler, quaternion, linear-accel, gravity, temp and
+        calib status occupy a single contiguous register block (0x08..0x35,
+        46 bytes). Reading it in one transaction instead of nine per-field
+        reads is the difference between ~20 Hz and the BNO055's 100 Hz fusion
+        ceiling. Returns the same dataclasses as the per-field getters, in the
+        order: euler, quat, lin_accel, gravity, accel, gyro, mag, temp, calib.
+        """
+        block = self._read_bytes(Register.ACC_X_LSB, 46)
+        ax, ay, az = struct.unpack_from('<hhh', block, 0)      # 0x08 accel
+        mx, my, mz = struct.unpack_from('<hhh', block, 6)      # 0x0E mag
+        gx, gy, gz = struct.unpack_from('<hhh', block, 12)     # 0x14 gyro
+        heading, roll, pitch = struct.unpack_from('<hhh', block, 18)  # 0x1A euler
+        qw, qx, qy, qz = struct.unpack_from('<hhhh', block, 24)  # 0x20 quaternion
+        lx, ly, lz = struct.unpack_from('<hhh', block, 32)     # 0x28 linear accel
+        rx, ry, rz = struct.unpack_from('<hhh', block, 38)     # 0x2E gravity
+        temp = block[44]                                       # 0x34 temperature
+        cal = block[45]                                        # 0x35 calib status
+        qs = 1.0 / (1 << 14)
+        return (
+            EulerAngles(heading / 16.0, roll / 16.0, pitch / 16.0),
+            Quaternion(qw * qs, qx * qs, qy * qs, qz * qs),
+            Vector3(lx / 100.0, ly / 100.0, lz / 100.0),
+            Vector3(rx / 100.0, ry / 100.0, rz / 100.0),
+            Vector3(ax / 100.0, ay / 100.0, az / 100.0),
+            Vector3(gx / 16.0, gy / 16.0, gz / 16.0),
+            Vector3(mx / 16.0, my / 16.0, mz / 16.0),
+            temp,
+            CalibrationStatus(
+                system=(cal >> 6) & 0x03,
+                gyro=(cal >> 4) & 0x03,
+                accel=(cal >> 2) & 0x03,
+                mag=cal & 0x03,
+            ),
+        )
+
 
 # ============================================================================
 # IMU Logger Application
@@ -403,7 +442,7 @@ class BNO055:
 class IMULogger:
     """IMU data logger with CSV output"""
 
-    def __init__(self, port: str = "/dev/ttyAMA5", poll_rate_hz: float = 50.0):
+    def __init__(self, port: str = "/dev/ttyAMA5", poll_rate_hz: float = 100.0):
         self.sensor = BNO055(port=port)
         self.poll_interval = 1.0 / poll_rate_hz
         self.running = False
@@ -496,32 +535,10 @@ class IMULogger:
                     # Get timestamp (µs since boot, same clock as camera)
                     monotonic_us = time.monotonic_ns() // 1000
 
-                    # Read all sensor data
-                    euler = self.sensor.get_euler()
-                    time.sleep(0.002)
-
-                    quat = self.sensor.get_quaternion()
-                    time.sleep(0.002)
-
-                    lin_accel = self.sensor.get_linear_acceleration()
-                    time.sleep(0.002)
-
-                    gravity = self.sensor.get_gravity()
-                    time.sleep(0.002)
-
-                    accel = self.sensor.get_accelerometer()
-                    time.sleep(0.002)
-
-                    gyro = self.sensor.get_gyroscope()
-                    time.sleep(0.002)
-
-                    mag = self.sensor.get_magnetometer()
-                    time.sleep(0.002)
-
-                    temp = self.sensor.get_temperature()
-                    time.sleep(0.002)
-
-                    calib = self.sensor.get_calibration()
+                    # Read all sensor data in ONE UART transaction (46-byte
+                    # contiguous block) — see BNO055.get_all().
+                    (euler, quat, lin_accel, gravity, accel,
+                     gyro, mag, temp, calib) = self.sensor.get_all()
 
                     # Write to CSV
                     self.csv_writer.writerow([
@@ -596,8 +613,8 @@ def main():
     parser.add_argument(
         "-r", "--rate",
         type=float,
-        default=50.0,
-        help="Polling rate in Hz"
+        default=100.0,
+        help="Polling rate in Hz (BNO055 fusion output is fixed at 100 Hz)"
     )
 
     args = parser.parse_args()

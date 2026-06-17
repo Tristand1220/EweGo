@@ -84,7 +84,7 @@ class BatteryLifeTest:
             sys.executable,
             str(imu_script),
             "--port", "/dev/ttyAMA5",
-            "--rate", "50"
+            "--rate", "100"
         ]
 
         def kill_stale_port_users():
