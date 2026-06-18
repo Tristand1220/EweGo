@@ -38,6 +38,9 @@ sampling → ±ms peak localization), but the long baseline pins its drift.
 - **`audio_drift_diagnostic.png`** — first-4 s vs last-4 s loudness envelopes
   (look aligned: 1 ms drift ≪ 10 ms envelope resolution) and raw-waveform zooms
   at start (overlap) vs end (visibly offset by ~1 ms) — the drift made visible.
+- **`clock_adjustment.png`** — (left) within each device, `CLOCK_REALTIME` vs
+  `CLOCK_MONOTONIC` are rate-locked to ~0 ppm; (right) the between-device audio
+  drift. Shows *why* clock_sync can't remove the drift (see findings).
 
 ## Key findings & caveats
 
@@ -48,6 +51,18 @@ sampling → ±ms peak localization), but the long baseline pins its drift.
   (supported in `chrony.conf`) would pull this toward the ppb range. It also
   shows in the IMU (system-clock-timestamped), confirming it's common-mode, not
   audio-hardware-specific.
+- **`CLOCK_MONOTONIC` is chrony-rate-disciplined; `CLOCK_MONOTONIC_RAW` is not.**
+  The sensor timestamps and Python's `time.monotonic()` use `CLOCK_MONOTONIC`,
+  whose *rate* is steered by the kernel's NTP/adjtimex discipline along with
+  `CLOCK_REALTIME` (only offset *steps* are REALTIME-only). Measured directly:
+  wall-vs-monotonic rate deviation is ~0.000 ppm on both devices, so the
+  monotonic→wall conversion is rate-identity (a pure offset). Consequently the
+  residual −0.71 ppm drift is **not** something the conversion or `clock_sync`
+  can remove — `clock_sync` only relates each device's two (co-steered) clocks
+  to each other, so the *inter-device* rate gap is common-mode invisible to it.
+  Only a shared external reference exposes/removes it: the audio content (used
+  here to measure it) or **GPS PPS** (to discipline it away). See
+  `clock_adjustment.png` and `clock_domain_check.py`.
 - **Always confirm broadband capture before trusting an audio lag.** A first
   attempt gave a *false* ~30 µs alignment that was actually locking onto
   grid-common 60 Hz mains hum / LF rumble. GCC-PHAT is run in the 300 Hz–4 kHz
@@ -80,3 +95,6 @@ uv run --no-project --with numpy --with matplotlib \
 `analyze_sync.py` auto-discovers `audio_*.wav`, `audio_*.timestamps.csv`,
 `clock_sync.csv`, and `imu/logs/imu_log_*.csv` in each capture dir (also accepts
 a flat layout with `audio.wav` / `audio_ts.csv` / `imu.csv`).
+
+`clock_domain_check.py` (same arguments) regenerates `clock_adjustment.png` and
+reuses the helpers in `analyze_sync.py`.
