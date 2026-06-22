@@ -286,7 +286,7 @@ class BatteryLifeTest:
 
         camera_output_dir = self.log_dir / "camera"
         sidecar_path = self.log_dir / SIDECAR["camera"]
-        cam_script = FIRMWARE_DIR / "dualcam" / "dual_cam_jp2.py"
+        cam_script = FIRMWARE_DIR / "dualcam" / "dual_cam_jp2_hw.py"
         cmd = [
             sys.executable,
             "-c",
@@ -296,11 +296,11 @@ import time
 import json
 sys.path.insert(0, '{FIRMWARE_DIR / "dualcam"}')
 
-import dual_cam_jp2
+import dual_cam_jp2_hw
 from pathlib import Path
 
 # Override the MinimalRecorder __init__ to use our output directory
-original_init = dual_cam_jp2.MinimalRecorder.__init__
+original_init = dual_cam_jp2_hw.MinimalRecorder.__init__
 
 def patched_init(self):
     self.cam1 = None
@@ -316,9 +316,9 @@ def patched_init(self):
     sidecar = Path("{sidecar_path}")
     sidecar.write_text(json.dumps({{"t0_ns": t0_ns}}))
 
-dual_cam_jp2.MinimalRecorder.__init__ = patched_init
+dual_cam_jp2_hw.MinimalRecorder.__init__ = patched_init
 
-dual_cam_jp2.main()
+dual_cam_jp2_hw.main()
 """
         ]
 

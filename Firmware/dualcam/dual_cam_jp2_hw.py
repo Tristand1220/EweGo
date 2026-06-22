@@ -181,9 +181,9 @@ class MinimalRecorder:
 
         # Start cameras
         self.cam1.start()
-        time.sleep(0.1)
+        time.sleep(0.01)
         self.cam2.start()
-        time.sleep(0.1)
+        time.sleep(0.01)
 
         # Start recording
         self.cam1.start_recording(enc1, self.out1)
