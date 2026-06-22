@@ -1,0 +1,25 @@
+# EweGo rsync filter — excludes files not needed on the Pi
+
+# Hardware design (KiCad PCB — dev-side only)
+Hardware/
+
+# Python caches
+__pycache__/
+*.py[codz]
+.ruff_cache/
+
+# Virtual environment (rebuilt on Pi via pi_setup.sh)
+.venv/
+
+# Experimental data (large files, lives on the Pi — no need to sync back)
+Data/
+
+# Recording output directories
+sensor_test_*/
+recordings/
+
+# Git internals
+.git/
+
+# Dev-side config
+CLAUDE.md

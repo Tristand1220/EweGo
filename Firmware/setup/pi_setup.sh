@@ -6,11 +6,15 @@
 #   - Dual IMX708 cameras (H.264 @ 1080p30)
 #   - BNO055 IMU via UART5
 #   - u-blox ZED-X20P GPS via UART3 + UART4
+#   - u-blox ZED-X20P GPS via UART3 + UART4
 #   - Google AIY Voice Hat (audio recording)
 #   - MAX17048 fuel gauge via I2C bus 1
 #
 # Usage:
 #   1. Flash Raspberry Pi OS (Bookworm/Trixie 64-bit) to SD card
+#   2. Set user/password during imaging (WiFi config via imager is unreliable,
+#      this script will configure it instead)
+#   3. Boot the Pi and connect via UART console (GPIO 14/15, 115200 baud)
 #   2. Set user/password during imaging (WiFi config via imager is unreliable,
 #      this script will configure it instead)
 #   3. Boot the Pi and connect via UART console (GPIO 14/15, 115200 baud)
@@ -52,17 +56,33 @@ info "Switching apt sources to HTTPS..."
 sudo sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
 sudo sed -i 's|http://archive.raspberrypi.com|https://archive.raspberrypi.com|g' /etc/apt/sources.list.d/raspi.sources 2>/dev/null || true
 
+# Pi OS Trixie uses HTTP apt sources by default; switch to HTTPS to avoid
+# failures on networks that block port 80 (phone hotspots, shared connections).
+info "Switching apt sources to HTTPS..."
+sudo sed -i 's|http://deb.debian.org|https://deb.debian.org|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
+sudo sed -i 's|http://archive.raspberrypi.com|https://archive.raspberrypi.com|g' /etc/apt/sources.list.d/raspi.sources 2>/dev/null || true
+
 info "Updating package index..."
-sudo apt update
+sudo apt update || warn "apt update failed (no internet?) — continuing with cached indexes"
+
+# systemd-timesyncd conflicts with chrony (both provide time-daemon).
+# Remove it first so the chrony install doesn't fail.
+if dpkg -l systemd-timesyncd 2>/dev/null | grep -q '^ii'; then
+    info "Removing systemd-timesyncd (conflicts with chrony)..."
+    sudo apt-get remove -y --purge systemd-timesyncd
+fi
 
 info "Installing system packages..."
 sudo apt install -y --no-install-recommends \
+sudo apt install -y --no-install-recommends \
     python3-picamera2 \
+    python3-libcamera \
     python3-libcamera \
     i2c-tools \
     python3-smbus2 \
     chrony \
-    pps-tools
+    pps-tools \
+    libportaudio2
 
 # --------------------------------------------------------------------------
 # 2. uv (Python package manager)
@@ -82,13 +102,20 @@ export PATH="$HOME/.local/bin:$PATH"
 # --------------------------------------------------------------------------
 info "Creating Python venv with system site-packages..."
 cd "$EWEGO_DIR"
+# Create the venv before uv sync — sync would otherwise create one WITHOUT
+# system site-packages, hiding the apt-installed picamera2.
 uv venv --system-site-packages
-uv pip install -r Firmware/requirements.txt
+# Install exactly what uv.lock pins (single source of truth: pyproject.toml).
+# --frozen: never re-resolve against PyPI, so behavior is deterministic and
+# later offline `uv run --no-sync` invocations match this environment.
+uv sync --frozen
 
 info "Verifying Python packages..."
 source .venv/bin/activate
 python -c "import serial; print(f'  pyserial: {serial.__version__}')"
 python -c "import pyubx2; print(f'  pyubx2: {pyubx2.__version__}')"
+python -c "import numpy; print(f'  numpy: {numpy.__version__}')"
+python -c "import sounddevice; print(f'  sounddevice: {sounddevice.__version__}')"
 python -c "import picamera2; print(f'  picamera2: {picamera2.__version__}')" 2>/dev/null || warn "picamera2 not available (OK if no cameras connected)"
 deactivate
 
@@ -157,48 +184,70 @@ fi
 # --------------------------------------------------------------------------
 # 6. USB Ethernet gadget (SSH over USB-C)
 # --------------------------------------------------------------------------
-# Enables the Pi to appear as a USB Ethernet adapter when connected via USB-C.
-# Creates a usb0 interface with a static IP for reliable SSH access.
+# The Pi appears as a USB NCM Ethernet adapter when connected via USB-C.
+# NCM, not legacy g_ether (ECM): the host-side cdc_ether driver TX-stalls on
+# newer laptop kernels (NETDEV WATCHDOG: transmit queue timed out); cdc_ncm
+# does not. usb_gadget_ncm.sh also assigns usb0 = 10.55.<N>.1/24, replacing
+# the old NetworkManager profile (NM racing the static IP caused flapping).
+# Per-device USB subnet: each Pi gets its own /24 so the laptop can host
+# multiple USB-C-connected Pis at once without same-subnet routing ambiguity.
 # This is independent of wlan0/bat0 and doesn't affect mesh networking.
 # Placed early so it's configured even if later steps fail or kill SSH.
 
-# Load g_ether module on boot
-if ! grep -q "g_ether" /etc/modules-load.d/usb-gadget.conf 2>/dev/null; then
-    info "Enabling USB Ethernet gadget on boot..."
-    printf "dwc2\ng_ether\n" | sudo tee /etc/modules-load.d/usb-gadget.conf
-else
-    info "USB Ethernet gadget already configured"
+# Kernel modules on boot: dwc2 (UDC) + libcomposite (configfs gadgets).
+# Drop legacy g_ether if a previous install added it — it would grab the UDC
+# first and the NCM gadget would then fail to bind.
+if ! grep -qx "libcomposite" /etc/modules-load.d/usb-gadget.conf 2>/dev/null || \
+   grep -q "g_ether" /etc/modules-load.d/usb-gadget.conf 2>/dev/null; then
+    info "Enabling USB NCM gadget modules on boot..."
+    printf "dwc2\nlibcomposite\n" | sudo tee /etc/modules-load.d/usb-gadget.conf
 fi
 
-# Configure static IP on usb0 via NetworkManager
-USB_CONN_FILE="/etc/NetworkManager/system-connections/usb-gadget.nmconnection"
-# Per-device USB subnet: each Pi gets its own /24 so the laptop can host
-# multiple USB-C-connected Pis at once without same-subnet routing ambiguity.
-USB_IP="10.55.${DEVICE_NUM}.1"
-if [ ! -f "$USB_CONN_FILE" ] || ! sudo grep -q "address1=${USB_IP}/24" "$USB_CONN_FILE" 2>/dev/null; then
-    info "Configuring USB gadget network (usb0 = $USB_IP)..."
-    sudo tee "$USB_CONN_FILE" > /dev/null <<EOF
-[connection]
-id=usb-gadget
-type=ethernet
-interface-name=usb0
-autoconnect=yes
+info "Installing USB NCM gadget service (usb0 = 10.55.${DEVICE_NUM}.1)..."
+sudo install -m 755 "$EWEGO_DIR/Firmware/setup/usb_gadget_ncm.sh" /usr/local/sbin/usb_gadget_ncm.sh
+sudo install -m 644 "$EWEGO_DIR/Firmware/setup/ewego-usb-gadget.service" /etc/systemd/system/ewego-usb-gadget.service
+sudo systemctl daemon-reload
+sudo systemctl enable ewego-usb-gadget.service > /dev/null 2>&1
 
-[ipv4]
-method=manual
-address1=${USB_IP}/24
-
-[ipv6]
-method=link-local
+# Tell NM to leave usb0 alone — the gadget service owns it. This file sorts
+# alphabetically BEFORE mesh_setup.sh's ewego-unmanaged.conf, so when mesh is
+# installed its superset (wlan0+usb0) takes precedence (NM: last file wins).
+NM_USB0_CONF="/etc/NetworkManager/conf.d/ewego-gadget-unmanaged.conf"
+if [ ! -f "$NM_USB0_CONF" ]; then
+    info "Configuring NetworkManager to ignore usb0..."
+    sudo mkdir -p /etc/NetworkManager/conf.d
+    sudo tee "$NM_USB0_CONF" > /dev/null <<'EOF'
+[keyfile]
+unmanaged-devices=interface-name:usb0
 EOF
-    sudo chmod 600 "$USB_CONN_FILE"
-    # Apply immediately so re-runs on an existing Pi take effect without
-    # waiting for reboot. Safe over USB-C — only this one connection cycles.
-    sudo nmcli connection reload 2>/dev/null || true
-    sudo nmcli connection down usb-gadget 2>/dev/null || true
-    sudo nmcli connection up usb-gadget 2>/dev/null || true
+    sudo systemctl reload NetworkManager 2>/dev/null || true
+fi
+
+# Remove the legacy NM profile from older installs. Deleting the active
+# profile strips usb0's IP — if this session is SSH'd over USB-C that would
+# kill it mid-script, so immediately re-add the IP by hand (NM ignores usb0
+# now, so a manual address is stable until the gadget service owns it).
+USB_CONN_FILE="/etc/NetworkManager/system-connections/usb-gadget.nmconnection"
+if [ -f "$USB_CONN_FILE" ]; then
+    info "Removing legacy usb-gadget NetworkManager profile..."
+    sudo nmcli connection delete usb-gadget 2>/dev/null || sudo rm -f "$USB_CONN_FILE"
+    # Best-effort only: a USB hiccup here must not abort the rest of setup
+    # (chrony + config.txt still need to run), so swallow failures.
+    if ip link show usb0 &>/dev/null; then
+        sudo ip link set usb0 up || true
+        sudo ip addr replace "10.55.${DEVICE_NUM}.1/24" dev usb0 || true
+    fi
+fi
+
+# Start now if possible. Don't unload a live g_ether — that drops the USB
+# link and would kill an SSH session running over USB-C; reboot handles it.
+if systemctl is-active --quiet ewego-usb-gadget.service; then
+    info "USB NCM gadget already active"
+elif lsmod | grep -q "^g_ether"; then
+    warn "Legacy g_ether is active — NCM gadget takes over after reboot"
 else
-    info "USB gadget network already configured at $USB_IP/24"
+    sudo systemctl start ewego-usb-gadget.service \
+        || warn "Gadget start failed (OK before reboot) — check: journalctl -u ewego-usb-gadget"
 fi
 
 # --------------------------------------------------------------------------
@@ -207,7 +256,7 @@ fi
 CHRONY_CONF_SRC="$EWEGO_DIR/Firmware/setup/chrony.conf"
 CHRONY_CONF_DST="/etc/chrony/chrony.conf"
 
-if [ ! -f "$CHRONY_CONF_SRC"]; then
+if [ ! -f "$CHRONY_CONF_SRC" ]; then
     warn "chrony.conf not found at $CHRONY_CONF_SRC - skipping chrony configurations"
     warn "Place chrony.conf in Firmware/setup/ and re-run to configure"
 else
@@ -216,15 +265,35 @@ else
     sudo chown root:root "$CHRONY_CONF_DST"
     sudo chmod 644 "$CHRONY_CONF_DST"
 
-    info "Enabling and restarting chrony service..."
-    sudo systemctl enable chrony
-    sudo systemctl restart chrony
+    # GPS/PPS refclocks require /dev/pps0 (pps-gpio overlay, active after first reboot).
+    # Install them into sources.d only when the device already exists so chrony
+    # doesn't fatal-error on first boot.
+    GPS_CONF_SRC="$EWEGO_DIR/Firmware/setup/chrony-gps.conf"
+    GPS_CONF_DST="/etc/chrony/sources.d/gps.conf"
+    sudo mkdir -p /etc/chrony/sources.d
+    if [ -e /dev/pps0 ]; then
+        info "PPS device found — installing GPS/PPS refclocks..."
+        sudo cp "$GPS_CONF_SRC" "$GPS_CONF_DST"
+        sudo chown root:root "$GPS_CONF_DST"
+        sudo chmod 644 "$GPS_CONF_DST"
+    else
+        sudo rm -f "$GPS_CONF_DST"
+        warn "No /dev/pps0 yet — GPS/PPS sources will be enabled after reboot"
+    fi
 
-    info "Chrony configured (GPS PPS on GPIO 18 via /dev/pps0)"
+    info "Enabling chrony service..."
+    sudo systemctl enable chrony
+
+    info "Starting chrony service..."
+    if ! sudo systemctl restart chrony 2>&1; then
+        warn "chrony failed to start — check: journalctl -u chrony"
+    else
+        info "Chrony configured (GPS PPS on GPIO 6 via /dev/pps0, mesh peers 10.42.0.1-16, internet fallback)"
+    fi
 fi
 
 # --------------------------------------------------------------------------
-# 7. /boot/firmware/config.txt (hardware overlays)
+# 8. /boot/firmware/config.txt (hardware overlays)
 # --------------------------------------------------------------------------
 CONFIG="/boot/firmware/config.txt"
 info "Configuring $CONFIG..."
@@ -246,7 +315,7 @@ if grep -qE "^[[:space:]]*otg_mode=1[[:space:]]*$" "$CONFIG"; then
 fi
 
 # (b) dtoverlay=dwc2,dr_mode=host — puts the dwc2 controller in host-only
-# mode, so g_ether finds no UDC to bind to.
+# mode, so the NCM gadget finds no UDC to bind to.
 if grep -qE "^[[:space:]]*dtoverlay=dwc2.*dr_mode=host" "$CONFIG"; then
     warn "Disabling 'dtoverlay=dwc2,dr_mode=host' — blocks USB gadget mode"
     sudo sed -i -E 's|^([[:space:]]*dtoverlay=dwc2.*dr_mode=host.*)$|#\1  # disabled by pi_setup.sh: conflicts with USB gadget|' "$CONFIG"
@@ -288,6 +357,10 @@ dtoverlay=googlevoicehat-soundcard
 dtoverlay=uart3
 dtoverlay=uart4
 
+# GPS PPS time pulse (GPIO 6 = TIMEPULSE output from ZED-X20P, per EweGo carrier board)
+# Harmless if PPS is not physically wired — /dev/pps0 simply won't appear.
+dtoverlay=pps-gpio,gpiopin=6
+
 # IMU UART5 configuration
 dtoverlay=uart5
 
@@ -306,7 +379,7 @@ EOF
 fi
 
 # --------------------------------------------------------------------------
-# 8. Summary
+# 9. Summary
 # --------------------------------------------------------------------------
 echo ""
 echo "============================================================================"
@@ -316,9 +389,10 @@ echo ""
 echo " What was configured:"
 echo "   - Hostname: ewe${DEVICE_NUM}"
 echo "   - USB-C SSH: usb0 = 10.55.${DEVICE_NUM}.1/24 (plug USB-C to laptop)"
-echo "   - python3-picamera2, i2c-tools, python3-smbus2 installed via apt"
-echo "   - uv + Python venv with pyserial, pyubx2"
-echo "   - i2c-dev + dwc2/g_ether kernel modules on boot"
+echo "   - chrony: GPS PPS (GPIO 6) > mesh peers 10.42.0.1-16 > internet fallback"
+echo "   - python3-picamera2, i2c-tools, python3-smbus2, libportaudio2 via apt"
+echo "   - uv + Python venv synced from uv.lock (pyserial, pyubx2, numpy, sounddevice)"
+echo "   - i2c-dev + dwc2/libcomposite kernel modules (NCM gadget) on boot"
 echo "   - config.txt: disable-bt, dual cameras, audio hat, GPS, IMU, fuel gauge"
 echo ""
 echo " Mesh networking: NOT configured (run mesh_setup.sh to enable)"
@@ -338,7 +412,7 @@ echo "==========================================================================
 echo ""
 
 # --------------------------------------------------------------------------
-# 9. Optional: chain into mesh setup
+# 10. Optional: chain into mesh setup
 # --------------------------------------------------------------------------
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 MESH_SETUP="${SCRIPT_DIR}/mesh_setup.sh"

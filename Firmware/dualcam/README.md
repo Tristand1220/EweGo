@@ -133,21 +133,30 @@ Video player for recordings with timestamp-based synchronization.
 
 ### Usage
 
-Run from the directory containing the camera files:
-
 ```bash
-# Dual side-by-side view (default)
+# Dual side-by-side view (default) — run from the camera/ subdir
 cd sensor_test_YYYYMMDD_HHMMSS/camera/
-python play_with_timestamps.py
+uv run python play_with_timestamps.py
+
+# Or point at the session root with --dir (auto-finds camera/ and audio)
+uv run python play_with_timestamps.py --dir sensor_test_YYYYMMDD_HHMMSS/
 
 # Single camera
-python play_with_timestamps.py 1
+uv run python play_with_timestamps.py 1
 
-# Convert to MP4
-python play_with_timestamps.py 1 --convert
-python play_with_timestamps.py 1 --convert --output custom_name.mp4
+# Export dual side-by-side MP4 with audio (auto-detected from session dir)
+uv run python play_with_timestamps.py --dir sensor_test_YYYYMMDD_HHMMSS/ --export
+uv run python play_with_timestamps.py --dir sensor_test_YYYYMMDD_HHMMSS/ --export output.mp4
+
+# Export without audio
+uv run python play_with_timestamps.py --dir sensor_test_YYYYMMDD_HHMMSS/ --export --no-audio
+
+# Convert single camera to MP4
+uv run python play_with_timestamps.py 1 --convert --output custom_name.mp4
 ```
 
+The `--export` path uses ffmpeg natively (no Python frame loop) — fast and lossless remux for the video, re-encoded with libx264 only for the final output. Audio is automatically picked up from `audio_*.wav` in the session directory when `--dir` is used.
+
 ### Requirements
-- `opencv-python` and `numpy` (installed via requirements.txt)
-- `ffmpeg` (installed via apt)
+- `opencv-python` and `numpy` (`uv run --extra dev` on dev machine)
+- `ffmpeg` (installed via apt, dev machine only)

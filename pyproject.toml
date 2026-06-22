@@ -5,8 +5,15 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "opencv-python>=4.13.0.92",
     "pyserial>=3.5",
     "pyubx2>=1.2.59",
+    "sounddevice>=0.5.1",
+    "numpy>=2.0",
 ]
 # picamera2 is installed system-wide via apt (depends on libcamera)
+
+[project.optional-dependencies]
+# Dev-side tools only (player script) — not needed on Pi
+dev = [
+    "opencv-python>=4.13.0.92",
+]

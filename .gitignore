@@ -1,6 +1,10 @@
 # Sensor test recordings (large video/audio data)
 sensor_test_*/
 recordings/
+Data/
+
+# Claude config files
+.claude/
 
 # KiCad lock files
 *.lck
@@ -212,3 +216,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# LaTeX build artifacts (commit .tex source only)
+Firmware/setup/ewego_network.pdf

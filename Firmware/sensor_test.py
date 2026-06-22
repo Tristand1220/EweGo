@@ -22,6 +22,7 @@ import signal
 import sys
 import time
 import os
+import csv
 from pathlib import Path
 from datetime import datetime, timezone
 import threading
@@ -57,6 +58,7 @@ class BatteryLifeTest:
         # Create subdirectories for organized logging
         (self.log_dir / "imu").mkdir(exist_ok=True)
         (self.log_dir / "camera").mkdir(exist_ok=True)
+        (self.log_dir / "gps").mkdir(exist_ok=True)
         
         # Path to shared manifest
         self.manifest_path = self.log_dir / "sync_manifest.json"
@@ -158,6 +160,54 @@ class BatteryLifeTest:
         
         
 
+    def _clock_sync_worker(self, out_path):
+        """Write (monotonic_us, wall_time_s) pairs at 10 ms intervals.
+
+        monotonic_us: time.monotonic_ns() // 1000 — unaffected by NTP, same
+          clock domain as camera timestamps and all other sensor timestamps.
+        wall_time_s:  time.time() — chrony-disciplined wall clock.
+
+        Together these let post-processing convert any monotonic timestamp to
+        wall time and correlate events across devices via chrony-synced wall time.
+        """
+        interval_s = 0.01  # 10 ms = 100 Hz
+        with open(out_path, "w", newline="", buffering=1) as f:
+            writer = csv.writer(f)
+            writer.writerow(["monotonic_us", "wall_time_s"])
+            next_tick = time.monotonic()
+            while self.running:
+                mono = time.monotonic_ns() // 1000
+                wall = time.time()
+                writer.writerow([mono, f"{wall:.6f}"])
+                next_tick += interval_s
+                sleep_s = next_tick - time.monotonic()
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+
+    def _clock_sync_worker(self, out_path):
+        """Write (monotonic_us, wall_time_s) pairs at 10 ms intervals.
+
+        monotonic_us: time.monotonic_ns() // 1000 — unaffected by NTP, same
+          clock domain as camera timestamps and all other sensor timestamps.
+        wall_time_s:  time.time() — chrony-disciplined wall clock.
+
+        Together these let post-processing convert any monotonic timestamp to
+        wall time and correlate events across devices via chrony-synced wall time.
+        """
+        interval_s = 0.01  # 10 ms = 100 Hz
+        with open(out_path, "w", newline="", buffering=1) as f:
+            writer = csv.writer(f)
+            writer.writerow(["monotonic_us", "wall_time_s"])
+            next_tick = time.monotonic()
+            while self.running:
+                mono = time.monotonic_ns() // 1000
+                wall = time.time()
+                writer.writerow([mono, f"{wall:.6f}"])
+                next_tick += interval_s
+                sleep_s = next_tick - time.monotonic()
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+
     def start_imu_logger(self, max_retries=3):
         """Start IMU data logger with retries (backup to IMU's internal retry)"""
         print("Starting IMU logger...")
@@ -170,7 +220,7 @@ class BatteryLifeTest:
             sys.executable,
             str(imu_script),
             "--port", "/dev/ttyAMA5",
-            "--rate", "50",
+            "--rate", "100",
             "--t0-sidecar", str(sidecar_path),
         ]
 
@@ -387,7 +437,41 @@ finally:
                     print(f"[FUEL] {line}")
         threading.Thread(target=monitor, daemon=True).start()
 
-    def start_all(self):
+    def start_gps_logger(self):
+        """Start GPS logger"""
+        print("Starting GPS logger...")
+
+        gps_log_dir = self.log_dir / "gps"
+        gps_script = FIRMWARE_DIR / "gps-test" / "gps_logger.py"
+        cmd = [
+            sys.executable,
+            str(gps_script),
+            "--port", "/dev/ttyAMA4",
+            "--baud", "460800",
+            "--log-dir", str(gps_log_dir),
+        ]
+        proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1
+        )
+        self.processes['gps'] = proc
+        print(f"  PID: {proc.pid}")
+        print(f"  Logging to: {gps_log_dir}")
+
+        def monitor():
+            for line in proc.stdout:
+                line = line.rstrip()
+                if any(kw in line for kw in [
+                    "Connected", "Logging", "Fix:", "NTRIP", "error",
+                    "failed", "stopped", "Statistics"
+                ]):
+                    print(f"[GPS] {line}")
+        threading.Thread(target=monitor, daemon=True).start()
+
+    def start_all(self, enable_gps=True):
         """Start all processes"""
         print("=" * 70)
         print("SENSOR TEST - UNIFIED DATA LOGGER")
@@ -403,6 +487,14 @@ finally:
 
         self.running = True
 
+        # Start clock-sync logger before any sensor so the log spans the
+        # full session including sensor startup.
+        threading.Thread(
+            target=self._clock_sync_worker,
+            args=(self.log_dir / "clock_sync.csv",),
+            daemon=True,
+        ).start()
+
         try:
             # Start cameras first — they take longest to initialize and
             # their init interferes with the IMU's UART.
@@ -417,6 +509,10 @@ finally:
 
             self.start_fuel_gauge_logger()
             time.sleep(1)
+
+            if enable_gps:
+                self.start_gps_logger()
+                time.sleep(1)
             
             # Collect t0 timestamps
             print()
@@ -488,11 +584,47 @@ finally:
         print("=" * 70)
         print(f"\nAll data saved to: {self.log_dir}/")
         print("\nSummary:")
+        print("  - Clock sync: " + str(self.log_dir / "clock_sync.csv"))
         print("  - Sync manifest: " + str(self.manifest_path))
         print("  - IMU logs: " + str(self.log_dir / "imu/"))
         print("  - Audio: " + str(self.log_dir / f"audio_{self.session}.wav"))
         print("  - Camera: " + str(self.log_dir / "camera/"))
         print("  - Fuel gauge: " + str(self.log_dir / f"fuel_gauge_{self.session}.csv"))
+        if 'gps' in self.processes:
+            print("  - GPS: " + str(self.log_dir / "gps/"))
+        print("=" * 70)
+        
+        # Trim all data streams to a common start time
+        print("\nStarting post-session data trimming...")
+        try:
+            trim_session(self.log_dir)
+        except Exception as e:
+            print(f"[TRIM] ERROR during trimming: {e}")
+            import traceback
+            traceback.print_exc()
+        
+    def _print_sync_summary(self):
+        """Print readable sync alignment summary from the manifest."""
+        try:
+            manifest = self._read_manifest()
+        except Exception:
+            return
+
+        print("\n" + "=" * 70)
+        print("SYNC SUMMARY")
+        print("=" * 70)
+        print(f"  Epoch: {manifest['epoch_iso']}  ({manifest['epoch_ns']} ns)")
+        print()
+        print(f"  {'Sensor':<14} {'t0 offset from epoch':>24}  {'Status'}")
+        print(f"  {'-'*14} {'-'*24}  {'-'*10}")
+        for sensor, info in manifest["sensors"].items():
+            if info["t0_ns"] is not None:
+                status = f"{info['offset_ms']:+.1f} ms"
+                flag   = "OK"
+            else:
+                status = "N/A"
+                flag   = "MISSING"
+            print(f"  {sensor:<14} {status:>24}  {flag}")
         print("=" * 70)
         
         # Trim all data streams to a common start time
@@ -531,10 +663,15 @@ finally:
 
 def main():
     """Main entry point"""
+    import argparse
+    parser = argparse.ArgumentParser(description="EweGo unified sensor logger")
+    parser.add_argument('--no-gps', action='store_true', help='Disable GPS logger (if GPS not installed)')
+    args = parser.parse_args()
+
     test = BatteryLifeTest()
 
     try:
-        return test.start_all()
+        return test.start_all(enable_gps=not args.no_gps)
     except KeyboardInterrupt:
         print("\n\nInterrupt received...")
         test.stop_all()
