@@ -12,7 +12,8 @@ produced by sawtooth_display.py, then generates two figures:
 
   FIGURE 2 — Audio analysis (3 plots)  [only when an audio file is present]
     Plot 4 — RMS envelope vs. UTC time   (mic signal + ground-truth sawtooth)
-    Plot 5 — Per-chunk RMS jitter        (chunk interval stability)
+    Plot 5 — Instantaneous amplitude envelope  (peak |signal| in 5 ms windows,
+                                                shows the sawtooth ramp shape)
     Plot 6 — Spectrogram                 (confirms sawtooth pitch over time)
 
 Usage:
@@ -30,6 +31,10 @@ Options:
     --max-frames INT     Cap frames decoded per camera (0 = all)
     --output-prefix PATH Save figures to <prefix>_camera.png and <prefix>_audio.png
                          instead of showing interactively
+    --no-html            Skip generating the interactive Plotly HTML version
+                         of the ROI brightness plot (hover tooltips, 5-decimal
+                         timestamps). Written by default as
+                         <prefix or session_dir>_brightness.html
     --verbose            Print per-frame data to stdout
 """
 
@@ -55,6 +60,12 @@ try:
 except ImportError:
     print("matplotlib not installed.  pip install matplotlib")
     sys.exit(1)
+
+try:
+    import plotly.graph_objects as go
+    PLOTLY_OK = True
+except ImportError:
+    PLOTLY_OK = False
 
 # scipy is optional — used for spectrogram only
 try:
@@ -118,6 +129,9 @@ def parse_args():
     p.add_argument("--max-frames", type=int, default=0)
     p.add_argument("--output-prefix", type=Path, default=None,
                    help="Save figures as <prefix>_camera.png and <prefix>_audio.png")
+    p.add_argument("--no-html", action="store_true",
+                   help="Skip generating the interactive Plotly HTML "
+                        "(<prefix or session_dir>_brightness.html)")
     p.add_argument("--verbose", action="store_true")
     return p.parse_args()
 
@@ -131,7 +145,12 @@ def load_params(session_dir: Path, override: Path | None) -> dict | None:
     Load sawtooth_params.json (preferred) or sine_params.json (legacy).
     Returns a normalised dict with keys:
         visual_freq_hz, visual_waveform,
-        audio_freq_hz   (None if absent),
+        audio_envelope_freq_hz  (None if absent — the rate the AUDIO RMS
+                                 should ramp at; matches visual_freq_hz when
+                                 audio is amplitude-modulated by the same
+                                 sawtooth)
+        audio_carrier_freq_hz   (None if absent — audible pitch only,
+                                 carries no timing information)
         start_utc_s     (float, epoch seconds)
     """
     candidates = []
@@ -152,22 +171,39 @@ def load_params(session_dir: Path, override: Path | None) -> dict | None:
         # Normalise sawtooth_params.json format
         if "visual" in raw:
             t0 = _parse_utc(raw["start_utc"])
+            audio_raw = raw.get("audio", {})
+
+            # New schema (amplitude-modulated): envelope_freq_hz / carrier_freq_hz
+            # Old schema (independent pitch):    freq_hz only
+            envelope_freq = audio_raw.get("envelope_freq_hz")
+            carrier_freq  = audio_raw.get("carrier_freq_hz")
+            if envelope_freq is None and "freq_hz" in audio_raw:
+                # Legacy sawtooth_params.json from before the AM fix —
+                # that freq_hz was the (constant-pitch) carrier; there was
+                # no real envelope, so there's nothing meaningful to plot
+                # against the visual signal.
+                carrier_freq  = audio_raw.get("freq_hz")
+                envelope_freq = None
+
+            # For sawtooth
             return {
-                "visual_freq_hz":  raw["visual"]["freq_hz"],
-                "visual_waveform": raw["visual"]["waveform"],
-                "audio_freq_hz":   raw.get("audio", {}).get("freq_hz"),
-                "start_utc_s":     t0,
-                "_raw":            raw,
+                "visual_freq_hz":         raw["visual"]["freq_hz"],
+                "visual_waveform":        raw["visual"]["waveform"],
+                "audio_envelope_freq_hz": envelope_freq,
+                "audio_carrier_freq_hz":  carrier_freq,
+                "start_utc_s":            t0,
+                "_raw":                   raw,
             }
 
-        # Legacy sine_params.json format
+        # Legacy sine_params.json format (visual-only, no audio at all)
         t0 = _parse_utc(raw["start_utc"])
         return {
-            "visual_freq_hz":  raw["freq_hz"],
-            "visual_waveform": "sine",
-            "audio_freq_hz":   None,
-            "start_utc_s":     t0,
-            "_raw":            raw,
+            "visual_freq_hz":         raw["freq_hz"],
+            "visual_waveform":        "sine",
+            "audio_envelope_freq_hz": None,
+            "audio_carrier_freq_hz":  None,
+            "start_utc_s":            t0,
+            "_raw":                   raw,
         }
 
     print("[analyze_sync] WARNING: no params file found — "
@@ -209,19 +245,40 @@ def ground_truth_visual(utc_times: np.ndarray, params: dict) -> np.ndarray:
         return off + amp * np.sin(2 * math.pi * freq * elapsed + ph)
 
 
-def ground_truth_audio_rms(utc_times: np.ndarray, params: dict,
-                           window_s: float = 0.05) -> np.ndarray:
+def ground_truth_audio_envelope(utc_times: np.ndarray, params: dict) -> "np.ndarray | None":
     """
-    Approximate the expected RMS envelope of a sawtooth audio signal.
-    A perfect sawtooth of amplitude A has RMS = A / sqrt(3).
-    We return a constant for each point (flat line = perfect signal).
-    Used as a reference line on the audio RMS plot.
+    Reconstruct the ground-truth AUDIO ENVELOPE (0.0-1.0, NOT yet scaled by
+    volume) for an array of UTC epoch seconds. This is the same-shaped
+    sawtooth as the visual signal, since sawtooth_display.py amplitude-
+    modulates the carrier tone by the visual brightness envelope.
+
+    Returns None if this session's params don't carry envelope info
+    (e.g. legacy sawtooth_params.json from before the AM fix, or no audio
+    params at all).
     """
-    raw     = params.get("_raw", {})
-    volume  = raw.get("audio", {}).get("volume", 0.8) if "audio" in raw else 0.8
-    # RMS of a sawtooth wave with peak amplitude V is V / sqrt(3)
-    expected_rms = volume / math.sqrt(3)
-    return np.full_like(utc_times, expected_rms, dtype=np.float64)
+    if params.get("audio_envelope_freq_hz") is None:
+        return None
+
+    elapsed = utc_times - params["start_utc_s"]
+    freq    = params["audio_envelope_freq_hz"]
+    return np.mod(elapsed * freq, 1.0)   # 0.0 -> 1.0 ramp, same shape as video
+
+
+def ground_truth_audio_rms_expected(params: dict) -> "float | None":
+    """
+    Theoretical time-averaged RMS of volume * envelope(t) * sin(carrier*t)
+    for a sawtooth envelope and a much-faster sine carrier. Used only as a
+    rough reference line; the real diagnostic is the shape-matching in
+    Plot 7 (AV comparison), not this single number.
+
+    RMS of envelope(t)=ramp[0,1) is 1/sqrt(3); RMS of unit sine carrier is
+    1/sqrt(2); for carrier frequency >> envelope frequency these multiply
+    independently to good approximation.
+    """
+    if params.get("audio_envelope_freq_hz") is None:
+        return None
+    volume = params.get("_raw", {}).get("audio", {}).get("volume", 0.8)
+    return volume * (1.0 / math.sqrt(3)) * (1.0 / math.sqrt(2))
 
 
 # ---------------------------------------------------------------------------
@@ -239,6 +296,17 @@ def load_timestamps_bin(path: Path) -> np.ndarray:
 def load_anchor(session_dir: Path):
     wall_str = (session_dir / "start_time.txt").read_text().strip()
     mono_str = (session_dir / "start_time_mono_us.txt").read_text().strip()
+    try:
+        dt = datetime.fromisoformat(wall_str)
+    except ValueError:
+        dt = datetime.fromisoformat(wall_str.replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp(), int(mono_str)
+
+def load_anchor_audio(session_dir: Path):
+    wall_str = (session_dir / "audio_t0_ns.txt").read_text().strip()
+    mono_str = (session_dir / "audio_start_time_mono_us.txt").read_text().strip()
     try:
         dt = datetime.fromisoformat(wall_str)
     except ValueError:
@@ -645,19 +713,150 @@ def make_camera_figure(utc1, bright1, utc2, bright2, params, session_label):
     return fig
 
 
+# ---------------------------------------------------------------------------
+# Interactive Plotly version of Plot 1 — ROI brightness with full-precision
+# hover tooltips (timestamps to 5 decimal places)
+# ---------------------------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Figure 2 — Audio sync
-# ---------------------------------------------------------------------------
+def make_brightness_html(utc1: np.ndarray, bright1: np.ndarray,
+                         utc2: np.ndarray, bright2: np.ndarray,
+                         params: dict | None, session_label: str):
+    """
+    Build an interactive Plotly version of the ROI brightness scatter
+    (Plot 1 from the matplotlib camera figure).
+
+    Hovering over any point shows:
+      - Elapsed time to 5 decimal places (i.e. down to 10 microseconds)
+      - The absolute UTC wall-clock time for that frame
+      - The frame's brightness value
+      - Which camera captured it
+
+    Returns a plotly.graph_objects.Figure, or None if plotly is unavailable.
+    """
+    if not PLOTLY_OK:
+        print("[analyze_sync] plotly not installed — skipping interactive "
+              "HTML output.  pip install plotly")
+        return None
+
+    t0     = min(utc1[0], utc2[0])
+    rel1   = utc1 - t0
+    rel2   = utc2 - t0
+    span_s = max(rel1[-1], rel2[-1])
+
+    fig = go.Figure()
+
+    # ---- Ground truth (drawn first, sits behind the camera traces) --------
+    if params is not None:
+        t_grid   = np.linspace(0, span_s, int(span_s * 200))
+        gt       = ground_truth_visual(t_grid + t0, params)
+        fig.add_trace(go.Scatter(
+            x=t_grid, y=gt,
+            mode="lines",
+            name=f"Ground-truth ({params['visual_waveform']})",
+            line=dict(color=TRUTH_COLOR, width=1.2, dash="dash"),
+            opacity=0.6,
+            hoverinfo="skip",   # reference line — frame hover is the point
+        ))
+
+    # ---- Helper to build the per-point hover text with 5-decimal time -----
+    def _hover_text(rel_s: np.ndarray, utc_s: np.ndarray,
+                    bright: np.ndarray, cam_label: str) -> list:
+        texts = []
+        for r, u, b in zip(rel_s, utc_s, bright):
+            utc_dt = datetime.fromtimestamp(u, tz=timezone.utc)
+            texts.append(
+                f"{cam_label}<br>"
+                f"Elapsed: {r:.5f} s<br>"
+                f"UTC: {utc_dt.strftime('%H:%M:%S.%f')[:-1]}<br>"
+                f"Brightness: {b:.2f}"
+            )
+        return texts
+
+    # ---- Camera 1 -----------------------------------------------------------
+    fig.add_trace(go.Scatter(
+        x=rel1, y=bright1,
+        mode="lines+markers",
+        name="Camera 1",
+        line=dict(color=CAM1_COLOR, width=1.2),
+        marker=dict(color=CAM1_COLOR, size=5, line=dict(width=0)),
+        opacity=0.9,
+        text=_hover_text(rel1, utc1, bright1, "Camera 1"),
+        hoverinfo="text",
+    ))
+
+    # ---- Camera 2 -----------------------------------------------------------
+    fig.add_trace(go.Scatter(
+        x=rel2, y=bright2,
+        mode="lines+markers",
+        name="Camera 2",
+        line=dict(color=CAM2_COLOR, width=1.2),
+        marker=dict(color=CAM2_COLOR, size=5, line=dict(width=0)),
+        opacity=0.9,
+        text=_hover_text(rel2, utc2, bright2, "Camera 2"),
+        hoverinfo="text",
+    ))
+
+    # ---- Layout: dark theme matching the matplotlib figures ----------------
+    title_extra = ""
+    if params is not None:
+        freq   = params["visual_freq_hz"]
+        period = 1.0 / freq
+        title_extra = f"   ·   f = {freq:.4f} Hz   T = {period:.2f} s"
+
+    fig.update_layout(
+        title=dict(
+            text=(f"ROI Brightness vs. Elapsed Time  "
+                  f"(hover for exact timestamp)  ·  Session: {session_label}"
+                  f"{title_extra}"),
+            font=dict(size=14, color="#eeeeee"),
+        ),
+        paper_bgcolor="#0d0d0d",
+        plot_bgcolor="#141414",
+        font=dict(color="#cccccc", family="monospace"),
+        xaxis=dict(
+            title="Elapsed time (s)  —  drag to zoom, double-click to reset",
+            gridcolor="#2a2a2a",
+            zerolinecolor="#333333",
+            # Plotly auto-formats tick density on zoom; for sub-second zoom
+            # the hover text remains the source of true precision since
+            # tick labels alone can't show 5 decimal places at all scales.
+        ),
+        yaxis=dict(
+            title="Mean brightness (0-255)",
+            range=[-5, 265],
+            gridcolor="#2a2a2a",
+            zerolinecolor="#333333",
+        ),
+        legend=dict(
+            bgcolor="#1a1a1a",
+            bordercolor="#333333",
+            borderwidth=1,
+            font=dict(color="#cccccc"),
+        ),
+        hovermode="closest",
+        hoverlabel=dict(
+            bgcolor="#1a1a1a",
+            font_size=12,
+            font_family="monospace",
+            bordercolor="#444444",
+        ),
+        height=600,
+        margin=dict(l=60, r=30, t=70, b=60),
+    )
+
+    return fig
+
+
 
 def make_audio_figure(audio_samples: np.ndarray, audio_sr: int,
                       audio_start_utc: float,
                       params: dict | None, session_label: str):
     """
     Three-panel audio analysis figure:
-      Plot 4 — RMS envelope vs elapsed time  (mic + expected reference)
-      Plot 5 — RMS chunk interval jitter     (stability of capture timing)
-      Plot 6 — Spectrogram                   (pitch/harmonics over time)
+      Plot 4 — RMS envelope vs elapsed time        (50 ms windows, smoothed)
+      Plot 5 — Instantaneous amplitude envelope    (5 ms peak-detection windows,
+                                                    shows sawtooth ramp shape)
+      Plot 6 — Spectrogram                         (confirms carrier pitch over time)
     """
     fig = plt.figure(figsize=(16, 11))
     fig.suptitle(
@@ -679,13 +878,15 @@ def make_audio_figure(audio_samples: np.ndarray, audio_sr: int,
     ax4.plot(centres_s, rms, "-", color=AUDIO_COLOR,
              alpha=0.85, linewidth=1.0, label="Mic RMS (50 ms windows)")
 
-    if params is not None and params.get("audio_freq_hz") is not None:
-        utc_rms = audio_start_utc + centres_s
-        ref     = ground_truth_audio_rms(utc_rms, params, WINDOW_S)
-        ax4.axhline(ref[0], color=TRUTH_COLOR, linewidth=1.0, linestyle="--",
-                    alpha=0.7, label=f"Expected RMS ({ref[0]:.3f})")
+    if params is not None and params.get("audio_envelope_freq_hz") is not None:
+        expected_peak = ground_truth_audio_rms_expected(params)
+        if expected_peak is not None:
+            ax4.axhline(expected_peak, color=TRUTH_COLOR, linewidth=1.0,
+                        linestyle="--", alpha=0.7,
+                        label=f"Expected peak RMS (~{expected_peak:.3f})")
         ax4.annotate(
-            f"audio f = {params['audio_freq_hz']:.1f} Hz",
+            f"envelope f = {params['audio_envelope_freq_hz']:.4f} Hz   "
+            f"carrier f = {params.get('audio_carrier_freq_hz', 0):.1f} Hz",
             xy=(0.02, 0.04), xycoords="axes fraction",
             fontsize=8, color="#888888",
         )
@@ -695,23 +896,54 @@ def make_audio_figure(audio_samples: np.ndarray, audio_sr: int,
     ax4.legend(loc="upper right", fontsize=9)
     _apply_elapsed_xaxis(ax4, span_s)
 
-    # ---- Plot 5: RMS chunk interval jitter ---------------------------------
+    # ---- Plot 5: Instantaneous amplitude envelope --------------------------
+    #
+    # Peak envelope follower: slide a short window across the raw samples
+    # and take max(abs()) within each window. This directly shows the
+    # sawtooth volume shape — the ramp from silence to peak and instant
+    # drop — without smoothing it into a flat RMS average. Uses a much
+    # shorter window than Plot 4 (5 ms vs 50 ms) so the ramp edges stay
+    # sharp and the sawtooth shape is visually clear.
+    ENV_WINDOW_S = 0.005   # 5 ms peak-detection window
+    env_win      = max(1, int(audio_sr * ENV_WINDOW_S))
+    n_env_win    = len(audio_samples) // env_win
+    env_blocks   = np.abs(
+        audio_samples[:n_env_win * env_win].reshape(n_env_win, env_win)
+    )
+    peak_envelope = env_blocks.max(axis=1)
+    env_centres_s = (np.arange(n_env_win) + 0.5) * ENV_WINDOW_S
+
     ax5 = fig.add_subplot(gs[1])
-    chunk_intervals = np.diff(centres_s) * 1000
-    ax5.plot(centres_s[1:], chunk_intervals, "-",
-             color=AUDIO2_COLOR, alpha=0.8, linewidth=0.9,
-             label="Chunk interval")
-    expected_iv = WINDOW_S * 1000
-    ax5.axhline(expected_iv, color="#ffffff", linewidth=0.8,
-                linestyle=":", alpha=0.5, label=f"expected {expected_iv:.1f} ms")
-    ax5.set_title("RMS Chunk Interval (audio capture regularity)",
-                  fontsize=10, pad=6)
-    ax5.set_ylabel("Interval  (ms)")
+    ax5.plot(env_centres_s, peak_envelope, "-",
+             color=AUDIO2_COLOR, alpha=0.85, linewidth=0.7,
+             label=f"Peak envelope ({ENV_WINDOW_S*1000:.0f} ms window)")
+
+    # Ground-truth sawtooth envelope overlay (scaled to volume)
+    if params is not None and params.get("audio_envelope_freq_hz") is not None:
+        gt_utc  = audio_start_utc + env_centres_s
+        gt_env  = ground_truth_audio_envelope(gt_utc, params)
+        if gt_env is not None:
+            raw     = params.get("_raw", {})
+            volume  = raw.get("audio", {}).get("volume", 0.8)
+            # Expected peak amplitude of the envelope*carrier product:
+            # when envelope=1.0 and carrier=±1.0, peak = volume
+            # RMS of unit sine = 1/sqrt(2), so expected peak env ≈ volume
+            ax5.plot(env_centres_s, gt_env * volume, "--",
+                     color=TRUTH_COLOR, linewidth=1.0, alpha=0.6,
+                     label="Ground-truth envelope")
+
+    ax5.set_title(
+        f"Instantaneous Amplitude Envelope  "
+        f"(peak of |signal| in {ENV_WINDOW_S*1000:.0f} ms windows)",
+        fontsize=10, pad=6,
+    )
+    ax5.set_ylabel("Peak amplitude")
     ax5.legend(loc="upper right", fontsize=8)
     _apply_elapsed_xaxis(ax5, span_s)
     ax5.annotate(
-        f"std={np.std(chunk_intervals):.3f} ms    "
-        f"max_dev={np.max(np.abs(chunk_intervals - expected_iv)):.3f} ms",
+        f"peak={float(peak_envelope.max()):.4f}    "
+        f"floor={float(np.percentile(peak_envelope, 5)):.4f}    "
+        f"dynamic_range={20*np.log10(peak_envelope.max()/max(peak_envelope.min(),1e-9)):.1f} dB",
         xy=(0.02, 0.04), xycoords="axes fraction", fontsize=8, color="#aaaaaa",
     )
 
@@ -724,8 +956,8 @@ def make_audio_figure(audio_samples: np.ndarray, audio_sr: int,
                                  nperseg=nperseg, noverlap=nperseg // 2)
         # t is already elapsed seconds from start of the audio file
         max_freq = 4000
-        if params and params.get("audio_freq_hz"):
-            max_freq = min(4000, params["audio_freq_hz"] * 8)
+        if params and params.get("audio_carrier_freq_hz"):
+            max_freq = min(4000, params["audio_carrier_freq_hz"] * 8)
         f_mask = f <= max_freq
 
         im = ax6.pcolormesh(
@@ -735,8 +967,8 @@ def make_audio_figure(audio_samples: np.ndarray, audio_sr: int,
         )
         plt.colorbar(im, ax=ax6, label="dB", pad=0.01)
 
-        if params and params.get("audio_freq_hz"):
-            fund = params["audio_freq_hz"]
+        if params and params.get("audio_carrier_freq_hz"):
+            fund = params["audio_carrier_freq_hz"]
             for k in range(1, 9):
                 hf = fund * k
                 if hf > max_freq:
@@ -754,6 +986,152 @@ def make_audio_figure(audio_samples: np.ndarray, audio_sr: int,
                  ha="center", va="center", transform=ax6.transAxes,
                  color="#888888", fontsize=11)
         ax6.set_title("Spectrogram (unavailable)", fontsize=10, pad=6)
+
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Figure 3 — Audio/Visual comparison
+# ---------------------------------------------------------------------------
+#
+# This is the direct answer to "how do I compare audio and visual together?"
+#
+# Both signals are normalized to a common 0.0-1.0 scale and plotted on the
+# SAME time axis:
+#   - Video: ROI brightness, normalized by /255
+#   - Audio: RMS envelope, normalized by its own observed peak
+#
+# Because sawtooth_display.py now amplitude-modulates the audio carrier by
+# the exact same sawtooth driving the screen, both curves SHOULD trace the
+# same ramp shape, frequency, and phase. Any visible lag between the two
+# curves is the true end-to-end AV offset between your camera pipeline and
+# your microphone capture pipeline, referenced to the same Pi UTC clock.
+# ---------------------------------------------------------------------------
+
+def make_av_comparison_figure(
+    rel_video_s: np.ndarray, video_norm: np.ndarray,
+    rel_audio_s: np.ndarray, audio_norm: np.ndarray,
+    params: dict | None, session_label: str,
+    rms_window_s: float = 0.005,
+):
+    """
+    Single-panel figure overlaying normalized video brightness and
+    normalized audio RMS envelope on a shared elapsed-time axis, plus
+    a lower panel showing the AV offset estimated via cross-correlation.
+
+    rms_window_s is the window used to compute the audio RMS envelope
+    upstream of this function; finer windows give a more faithful audio
+    envelope shape, which helps cross-correlation accuracy, but the
+    dominant resolution floor on the measured lag is actually the common
+    time grid step (common_dt below) combined with the video frame
+    interval, since video uses zero-order-hold (step) resampling.
+    """
+    fig = plt.figure(figsize=(16, 8))
+    fig.suptitle(
+        f"Audio/Visual Comparison  ·  Session: {session_label}",
+        fontsize=13, fontweight="bold", y=0.97, color="#eeeeee",
+    )
+    gs = gridspec.GridSpec(
+        2, 1, figure=fig, hspace=0.5,
+        left=0.07, right=0.97, top=0.90, bottom=0.10,
+        height_ratios=[2.5, 1],
+    )
+
+    span_s = max(rel_video_s[-1], rel_audio_s[-1])
+
+    # ---- Top panel: overlaid normalized signals -----------------------------
+    ax1 = fig.add_subplot(gs[0])
+    ax1.plot(rel_video_s, video_norm, "-o", color=CAM1_COLOR,
+             alpha=0.85, linewidth=0.8, markersize=3,
+             markerfacecolor=CAM1_COLOR, markeredgewidth=0,
+             label="Video brightness (normalized)")
+    ax1.plot(rel_audio_s, audio_norm, "-", color=AUDIO_COLOR,
+             alpha=0.85, linewidth=1.0,
+             label="Audio RMS envelope (normalized)")
+
+    if params is not None:
+        freq = params["visual_freq_hz"]
+        ax1.annotate(
+            f"shared envelope f = {freq:.4f} Hz  T = {1/freq:.2f} s",
+            xy=(0.02, 0.04), xycoords="axes fraction",
+            fontsize=8, color="#888888",
+        )
+
+    ax1.set_title(
+        "Normalized Video Brightness vs. Audio RMS  (same time base)",
+        fontsize=10, pad=6,
+    )
+    ax1.set_ylabel("Normalized amplitude  (0-1)")
+    ax1.set_ylim(-0.05, 1.05)
+    ax1.legend(loc="upper right", fontsize=9)
+    _apply_elapsed_xaxis(ax1, span_s)
+
+    # ---- Bottom panel: cross-correlation lag estimate ------------------------
+    ax2 = fig.add_subplot(gs[1])
+
+    # Resample both signals onto a common uniform time grid so cross-
+    # correlation is meaningful (video and audio have different native
+    # sample rates / irregular timestamps).
+    #
+    # IMPORTANT: video uses ZERO-ORDER-HOLD (step) interpolation, not linear.
+    # Linear interpolation across a sawtooth's sharp reset invents a fake
+    # ramp through the gap between two real video samples (e.g. a frame at
+    # the peak followed by a frame at the trough gets linearly connected),
+    # which biases the cross-correlation peak by tens of milliseconds.
+    # Zero-order-hold instead holds each frame's value until the next frame
+    # arrives — correctly representing "we don't know what happened between
+    # samples" instead of inventing a transition that never occurred.
+    common_dt  = 0.005   # 5 ms grid — also sets the lag resolution floor
+    grid       = np.arange(0, span_s, common_dt)
+
+    video_idx  = np.clip(
+        np.searchsorted(rel_video_s, grid, side="right") - 1,
+        0, len(video_norm) - 1,
+    )
+    video_grid = video_norm[video_idx]
+    audio_grid = np.interp(grid, rel_audio_s, audio_norm)   # audio is densely
+                                                            # sampled already,
+                                                            # linear is fine here
+
+    # Remove DC offset before correlating so the match is about shape, not level
+    v = video_grid - np.mean(video_grid)
+    a = audio_grid - np.mean(audio_grid)
+
+    corr     = np.correlate(a, v, mode="full")
+    lags     = np.arange(-len(v) + 1, len(v)) * common_dt
+    peak_idx = np.argmax(corr)
+    best_lag = lags[peak_idx]
+
+    # Only show a window around zero lag (+/- 0.5 period or 1s, whichever larger)
+    window = max(1.0, (1.0 / params["visual_freq_hz"]) * 0.75) if params else 1.0
+    mask   = np.abs(lags) <= window
+
+    ax2.plot(lags[mask] * 1000, corr[mask], "-", color=DELTA_COLOR,
+             linewidth=1.0, alpha=0.85)
+    ax2.axvline(0, color="#555555", linewidth=0.7, linestyle="--")
+    ax2.axvline(best_lag * 1000, color="#ffffff", linewidth=1.0,
+                linestyle=":", alpha=0.8,
+                label=f"best-fit lag = {best_lag*1000:+.2f} ms")
+
+    ax2.set_title(
+        "Cross-correlation: Audio relative to Video "
+        "(positive = audio lags video)",
+        fontsize=10, pad=6,
+    )
+    ax2.set_xlabel("Lag  (ms)")
+    ax2.set_ylabel("Correlation")
+    ax2.legend(loc="upper right", fontsize=8)
+
+    interpretation = (
+        "audio arrives AFTER video" if best_lag > 0 else
+        "audio arrives BEFORE video" if best_lag < 0 else
+        "perfectly aligned"
+    )
+    ax2.annotate(
+        f"AV offset: {best_lag*1000:+.2f} ms  ({interpretation})   "
+        f"resolution limit: ~\u00b1{common_dt*1000:.0f} ms (grid step)",
+        xy=(0.02, 0.04), xycoords="axes fraction", fontsize=8, color="#aaaaaa",
+    )
 
     return fig
 
@@ -781,10 +1159,16 @@ def main():
     ts2_path = session_dir / "camera2_timestamps.bin"
     v1_path  = session_dir / "camera1.mjpeg"
     v2_path  = session_dir / "camera2.mjpeg"
+    
 
     for p in (ts1_path, ts2_path, v1_path, v2_path):
         if not p.exists():
             print(f"ERROR: Required camera file missing: {p}")
+            sys.exit(1)
+            
+    for a in (audio_time_path,):
+        if not a.exists():
+            print(f"ERROR: Required audio file missing: {a}")
             sys.exit(1)
 
     # ---- Load camera timestamps and convert to UTC -------------------------
@@ -796,6 +1180,8 @@ def main():
     start_utc_s, start_mono_us = load_anchor(session_dir)
     utc1 = mono_us_to_utc(mono1, start_utc_s, start_mono_us)
     utc2 = mono_us_to_utc(mono2, start_utc_s, start_mono_us)
+    
+
 
     # ---- Extract brightness ------------------------------------------------
     roi = tuple(args.roi) if args.roi else None
@@ -816,9 +1202,30 @@ def main():
     fig_cam = make_camera_figure(utc1, bright1, utc2, bright2,
                                  params, session_label)
 
+
+    # ---- Interactive Plotly brightness plot (hover tooltips) ---------------
+    fig_html = None
+    if not args.no_html:
+        print("[analyze_sync] Rendering interactive brightness plot...")
+        fig_html = make_brightness_html(utc1, bright1, utc2, bright2,
+                                        params, session_label)
+
     # ---- Audio (optional) --------------------------------------------------
     audio_path = args.audio or session_dir / "audio.wav"
     fig_audio  = None
+    fig_av     = None
+    audio_time_path =  session_dir / "audio_timestamps.bin"
+    
+    # ---- Load audio timestamps and convert to UTC -------------------------
+    print("[analyze_sync] Loading audio timestamps...")
+    mono3 = load_timestamps_bin(audio_time_path)
+    print(f"  audio: {len(mono3)} timestamps")
+
+    start_utc_s, start_mono_us = load_anchor_audio(session_dir)
+    
+    # May need to change to account for audio start time....
+    utc3 = mono_us_to_utc(mono3, start_utc_s, start_mono_us)
+
 
     if audio_path.exists():
         print(f"[analyze_sync] Loading audio from {audio_path}...")
@@ -831,8 +1238,8 @@ def main():
             # 1. Explicit CLI flag
             # 2. Auto-detected t0 sidecar JSON from the recorder script
             # 3. Session start_time.txt (fallback with warning)
-            if args.audio_start_utc is not None:
-                audio_start = args.audio_start_utc
+            if start_utc_s is not None:
+                audio_start = start_utc_s
                 print(f"  Audio t0 from --audio-start-utc: {audio_start:.3f} s")
             else:
                 audio_start = load_audio_sidecar(session_dir, audio_path)
@@ -849,6 +1256,46 @@ def main():
             fig_audio = make_audio_figure(
                 audio_samples, audio_sr, audio_start, params, session_label,
             )
+
+            # --- AV comparison figure -----------------------------------
+            # Build normalized video brightness and normalized audio RMS
+            # on independent time bases, both relative to the same t0.
+            #
+            # IMPORTANT: RMS windowing smears sharp sawtooth edges, which
+            # biases the measured lag by roughly the window width. We use
+            # a much smaller window here (5 ms) than the main audio figure
+            # (50 ms) specifically to minimize this bias for lag estimation.
+            print("[analyze_sync] Rendering AV comparison figure...")
+            t0_av = min(utc1[0], utc2[0], audio_start)
+
+            rel_video_s = utc1 - t0_av           # use camera 1 as the video reference
+            video_norm  = bright1 / 255.0
+
+            WINDOW_S_AV = 0.005   # 5 ms — minimizes edge-smearing bias vs. the
+                                  # 50 ms window used in the main audio figure
+            rms_av, centres_av_s = compute_rms_envelope(
+                audio_samples, audio_sr, WINDOW_S_AV)
+            rel_audio_s = (audio_start - t0_av) + centres_av_s
+
+            # Normalize audio RMS by its own observed peak so it's on the
+            # same 0-1 scale as video brightness, regardless of --volume
+            peak = float(np.max(rms_av)) if np.max(rms_av) > 0 else 1.0
+            audio_norm = rms_av / peak
+
+            fig_av = make_av_comparison_figure(
+                rel_video_s, video_norm,
+                rel_audio_s, audio_norm,
+                params, session_label,
+                rms_window_s=WINDOW_S_AV,
+            )
+            
+            # ---- Why the charts may be misaligned -----------------------------------------------------
+            print(f"start_utc_s:     {start_utc_s:.6f}")
+            print(f"start_mono_us:   {start_mono_us}")
+            print(f"mono1[0]:        {mono1[0]}")
+            print(f"audio_start:     {audio_start:.6f}")
+            print(f"utc1[0]:         {utc1[0]:.6f}")
+            print(f"utc1[0]-audio:   {utc1[0] - audio_start:.3f} s")
         except Exception as e:
             print(f"  [WARN] Audio analysis failed: {e}")
     else:
@@ -859,13 +1306,31 @@ def main():
     if args.output_prefix:
         cam_out   = Path(str(args.output_prefix) + "_camera.png")
         audio_out = Path(str(args.output_prefix) + "_audio.png")
+        av_out    = Path(str(args.output_prefix) + "_av_comparison.png")
+        html_out  = Path(str(args.output_prefix) + "_brightness.html")
+    else:
+        cam_out   = session_dir / f"{session_label}_camera.png"
+        audio_out = session_dir / f"{session_label}_audio.png"
+        av_out    = session_dir / f"{session_label}_av_comparison.png"
+        html_out  = session_dir / f"{session_label}_brightness.html"
+
+    if args.output_prefix:
         fig_cam.savefig(cam_out, dpi=150, bbox_inches="tight")
         print(f"[analyze_sync] Camera figure saved → {cam_out}")
         if fig_audio:
             fig_audio.savefig(audio_out, dpi=150, bbox_inches="tight")
             print(f"[analyze_sync] Audio figure saved  → {audio_out}")
+        if fig_av:
+            fig_av.savefig(av_out, dpi=150, bbox_inches="tight")
+            print(f"[analyze_sync] AV comparison figure saved → {av_out}")
     else:
         plt.show()
+
+    if fig_html is not None:
+        fig_html.write_html(str(html_out), include_plotlyjs="cdn")
+        print(f"[analyze_sync] Interactive brightness plot saved → {html_out}")
+        print("  Open this file in a browser and hover over any point "
+              "for exact timestamps (5 decimal places).")
 
 
 if __name__ == "__main__":
