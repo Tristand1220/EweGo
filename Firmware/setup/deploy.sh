@@ -110,6 +110,10 @@ fi
 # Use the resolved IP for actual network ops; keep $TARGET for user-facing display
 TARGET_SSH="${TARGET_USER}@${TARGET_IP}"
 
+# Pi IPs are recycled constantly (DHCP, re-imaging, shared USB/mesh subnets),
+# so pinned host keys produce false MITM alarms. Don't record or check them.
+SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null)
+
 TARGET_DIR="~/EweGo"
 
 # Resolve repo root (two levels up from this script: setup/ -> Firmware/ -> EweGo/)
@@ -141,6 +145,7 @@ fi
 # --------------------------------------------------------------------------
 info "Syncing firmware..."
 rsync -avz --progress \
+    -e "ssh ${SSH_OPTS[*]}" \
     $EXCLUDE_ARG \
     "$REPO_ROOT/" \
     "$TARGET_SSH:$TARGET_DIR"
@@ -156,18 +161,18 @@ read -r -p "Run pi_setup.sh on $TARGET_HOST now? [y/N] " RUN_SETUP
 if [[ "$RUN_SETUP" =~ ^[Yy]$ ]]; then
     info "Running pi_setup.sh on $TARGET_HOST..."
     # -t allocates a TTY so sudo can prompt for a password
-    ssh -t "$TARGET_SSH" "bash $TARGET_DIR/Firmware/setup/pi_setup.sh"
+    ssh -t "${SSH_OPTS[@]}" "$TARGET_SSH" "bash $TARGET_DIR/Firmware/setup/pi_setup.sh"
     echo ""
     read -r -p "Reboot $TARGET_HOST now? [y/N] " DO_REBOOT
     if [[ "$DO_REBOOT" =~ ^[Yy]$ ]]; then
         info "Rebooting $TARGET_HOST..."
-        ssh -t "$TARGET_SSH" "sudo reboot" || true
+        ssh -t "${SSH_OPTS[@]}" "$TARGET_SSH" "sudo reboot" || true
     else
         warn "Remember to reboot for config.txt changes to take effect."
     fi
 else
     info "Skipping setup. To run manually:"
-    echo "  ssh -t $TARGET_SSH \"bash $TARGET_DIR/Firmware/setup/pi_setup.sh\""
+    echo "  ssh -t ${SSH_OPTS[*]} $TARGET_SSH \"bash $TARGET_DIR/Firmware/setup/pi_setup.sh\""
 fi
 
 echo ""

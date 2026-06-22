@@ -1,5 +1,6 @@
 [Unit]
 Description=EweGo USB NCM gadget (configfs)
+Requires=sys-kernel-config.mount
 After=sys-kernel-config.mount systemd-modules-load.service
 DefaultDependencies=no
 Before=network-pre.target

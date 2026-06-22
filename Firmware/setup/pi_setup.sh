@@ -211,11 +211,20 @@ EOF
     sudo systemctl reload NetworkManager 2>/dev/null || true
 fi
 
-# Remove the legacy NM profile from older installs
+# Remove the legacy NM profile from older installs. Deleting the active
+# profile strips usb0's IP — if this session is SSH'd over USB-C that would
+# kill it mid-script, so immediately re-add the IP by hand (NM ignores usb0
+# now, so a manual address is stable until the gadget service owns it).
 USB_CONN_FILE="/etc/NetworkManager/system-connections/usb-gadget.nmconnection"
 if [ -f "$USB_CONN_FILE" ]; then
     info "Removing legacy usb-gadget NetworkManager profile..."
     sudo nmcli connection delete usb-gadget 2>/dev/null || sudo rm -f "$USB_CONN_FILE"
+    # Best-effort only: a USB hiccup here must not abort the rest of setup
+    # (chrony + config.txt still need to run), so swallow failures.
+    if ip link show usb0 &>/dev/null; then
+        sudo ip link set usb0 up || true
+        sudo ip addr replace "10.55.${DEVICE_NUM}.1/24" dev usb0 || true
+    fi
 fi
 
 # Start now if possible. Don't unload a live g_ether — that drops the USB

@@ -13,6 +13,7 @@
 #   bash ewego_usb.sh up <N|hostname>   Configure laptop for that Pi
 #   bash ewego_usb.sh down <N|hostname> Remove that Pi's laptop IP
 #   bash ewego_usb.sh ssh <N|hostname>  Configure (if needed) then SSH
+#   bash ewego_usb.sh nm-restore        Hand USB NICs back to NetworkManager
 #
 # Examples:
 #   bash ewego_usb.sh ssh 7             SSH to Pi #7 at 10.55.7.1
@@ -85,13 +86,42 @@ probe_iface_identity() {
     # Ensure link-local is up (interface must be UP even without IPv4)
     sudo ip link set "$iface" up 2>/dev/null || true
 
-    # Solicit neighbor advertisements from all nodes on the link
-    ping6 -c2 -W1 "ff02::1%${iface}" >/dev/null 2>&1 || true
+    # NetworkManager sets addr_gen_mode=1 on ifaces it considers disconnected,
+    # which strips our own fe80. Without a source address the multicast probe
+    # can't even leave — restore generation and bounce the iface to get one.
+    if ! ip -6 addr show dev "$iface" scope link 2>/dev/null | grep -q fe80; then
+        sudo sh -c "echo 0 > /proc/sys/net/ipv6/conf/${iface}/addr_gen_mode" 2>/dev/null || true
+        sudo ip link set "$iface" down 2>/dev/null || true
+        sudo ip link set "$iface" up 2>/dev/null || true
+    fi
+    # Wait out duplicate address detection (fe80 is unusable while tentative)
+    local i
+    for i in 1 2 3 4 5 6; do
+        ip -6 addr show dev "$iface" scope link 2>/dev/null | \
+            grep -q 'fe80.*tentative' || break
+        sleep 0.5
+    done
 
-    # Find a reachable fe80 neighbor (the Pi's link-local addr)
+    local own
+    own=$(ip -6 addr show dev "$iface" scope link 2>/dev/null | \
+        awk '/inet6 fe80/{sub("/.*","",$2); print $2; exit}')
+    [ -z "$own" ] && return 1
+
+    # Solicit neighbor advertisements from all nodes on the link, keeping the
+    # responder addresses (format: "64 bytes from fe80::x%iface: ...")
+    local replies
+    replies=$(ping -6 -c2 -W1 "ff02::1%${iface}" 2>/dev/null | \
+        awk -F'[ %]' '/bytes from fe80/{print $4}' | sort -u)
+
+    # Find a reachable fe80 neighbor (the Pi's link-local addr). The neighbor
+    # table sometimes stays empty even when replies arrive, so fall back to
+    # the ping responders themselves (excluding our own echo).
     local remote
     remote=$(ip -6 neigh show dev "$iface" 2>/dev/null | \
         awk '/fe80.*REACHABLE|fe80.*STALE|fe80.*DELAY/{print $1; exit}')
+    if [ -z "$remote" ]; then
+        remote=$(grep -vxF "$own" <<<"$replies" | head -1)
+    fi
     [ -z "$remote" ] && return 1
 
     # SSH via link-local to get hostname (scope ID required: addr%iface)
@@ -108,6 +138,50 @@ probe_iface_identity() {
     local n
     n=$(parse_device_num "$name") || return 1
     echo "$n $name"
+}
+
+# NetworkManager treats USB gadget ifaces it considers "disconnected" as fair
+# game: it sets addr_gen_mode=1 (stripping the IPv6 link-local the discovery
+# probe depends on) and removes manually-assigned IPs. Install a one-time conf
+# matching the gadget *drivers* — survives random per-boot MACs and
+# port-dependent names — so NM leaves every plugged-in Pi alone.
+NM_UNMANAGED_CONF="/etc/NetworkManager/conf.d/ewego-usb-unmanaged.conf"
+ensure_nm_unmanaged() {
+    command -v nmcli >/dev/null 2>&1 || return 0
+    systemctl is-active --quiet NetworkManager 2>/dev/null || return 0
+    [ -f "$NM_UNMANAGED_CONF" ] && return 0
+    info "Telling NetworkManager to ignore USB gadget ifaces (one-time setup)..."
+    printf '[device-ewego-usb]\nmatch-device=driver:cdc_ncm;driver:cdc_ether;driver:rndis_host\nmanaged=0\n' | \
+        sudo tee "$NM_UNMANAGED_CONF" > /dev/null
+    sudo systemctl reload NetworkManager
+    # This match is by driver, not by our specific Pis, so it also covers any
+    # ordinary USB-Ethernet dongle (many bind cdc_ncm/cdc_ether). If you plug
+    # one in for real internet and NM won't manage it, undo with the line below.
+    warn "NetworkManager will now ignore ALL cdc_ncm/cdc_ether/rndis USB NICs on this laptop."
+    warn "  Undo anytime with:  bash $0 nm-restore"
+    # Undo NM's addr_gen_mode damage and bounce ifaces to regrow fe80 addrs
+    local i
+    for i in $(find_usb_ifaces); do
+        sudo sh -c "echo 0 > /proc/sys/net/ipv6/conf/${i}/addr_gen_mode" 2>/dev/null || true
+        sudo ip link set "$i" down 2>/dev/null || true
+        sudo ip link set "$i" up 2>/dev/null || true
+    done
+    sleep 1
+}
+
+# Undo ensure_nm_unmanaged: remove the conf and hand the USB NICs back to NM.
+cmd_nm_restore() {
+    if [ ! -f "$NM_UNMANAGED_CONF" ]; then
+        info "NetworkManager is already managing USB NICs (no $NM_UNMANAGED_CONF)."
+        return 0
+    fi
+    sudo -v
+    info "Removing $NM_UNMANAGED_CONF..."
+    sudo rm -f "$NM_UNMANAGED_CONF"
+    if command -v nmcli >/dev/null 2>&1 && systemctl is-active --quiet NetworkManager 2>/dev/null; then
+        sudo systemctl reload NetworkManager
+    fi
+    info "NetworkManager will manage cdc_ncm/cdc_ether/rndis USB NICs again."
 }
 
 # Remove all IPv4 addresses from an iface. Used before assigning a new one.
@@ -168,6 +242,7 @@ cmd_list() {
 
 cmd_up_auto() {
     sudo -v
+    ensure_nm_unmanaged
     local found=0
     for iface in $(find_usb_ifaces); do
         local cur
@@ -189,7 +264,7 @@ cmd_up_auto() {
             cmd_up "$n"
             found=$((found + 1))
         else
-            warn "$iface: no Pi identity found via mDNS — try 'up <N>' manually"
+            warn "$iface: no Pi identity found via IPv6 link-local — try 'up <N>' manually"
         fi
     done
     [ "$found" -eq 0 ] && warn "No EweGo Pis discovered" || true
@@ -204,6 +279,7 @@ cmd_up() {
 
     # Prime sudo so subsequent ip commands don't each prompt
     sudo -v
+    ensure_nm_unmanaged
 
     local ifaces
     ifaces=($(find_usb_ifaces))
@@ -371,9 +447,12 @@ case "$ACTION" in
         [ $# -lt 2 ] && { error "Usage: $0 nat <N|hostname>"; exit 1; }
         cmd_nat "$2"
         ;;
+    nm-restore)
+        cmd_nm_restore
+        ;;
     *)
         error "Unknown action: $ACTION"
-        echo "Usage: bash $0 [list|up|down|ssh|nat] [N|hostname|auto]"
+        echo "Usage: bash $0 [list|up|down|ssh|nat|nm-restore] [N|hostname|auto]"
         exit 1
         ;;
 esac
