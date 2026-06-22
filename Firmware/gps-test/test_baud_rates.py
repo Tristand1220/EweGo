@@ -3,10 +3,11 @@
 Test different baud rates and fetch data from the GNSS module
 """
 
+import io
 import serial
 import time
 import sys
-from pyubx2 import UBXReader
+from pyubx2 import UBXReader, UBX_PROTOCOL, NMEA_PROTOCOL
 
 # Configuration
 GPS_PORT = '/dev/ttyAMA4'
@@ -27,20 +28,17 @@ def test_baud_rate(port, baud):
         time.sleep(2)
         
         raw_data = ser.read(1000)
-        
+
         if len(raw_data) == 0:
             return False, 0, 0, None
-        
-        # Count UBX messages (look for sync bytes 0xB5 0x62)
-        ubx_count = sum(1 for i in range(len(raw_data)-1) 
-                       if raw_data[i] == 0xB5 and raw_data[i+1] == 0x62)
-        
-        # Also check for NMEA ($ or !)
-        nmea_count = sum(1 for i in range(len(raw_data)) 
-                        if raw_data[i:i+1] == b'$' or raw_data[i:i+1] == b'!')
-        
+
+        # Only checksum-valid messages count — at the wrong baud rate the
+        # port still delivers bytes (line noise), which previously produced
+        # false "WORKING" results and a bogus recommendation.
+        ubx_count, nmea_count = count_valid_messages(raw_data)
+
         ser.close()
-        
+
         return True, ubx_count, nmea_count, raw_data[:200]  # First 200 bytes
         
     except Exception as e:
@@ -50,6 +48,29 @@ def test_baud_rate(port, baud):
             except:
                 pass
         return False, 0, 0, str(e)
+
+
+def count_valid_messages(raw_data):
+    """Count checksum-valid UBX and NMEA messages in a byte buffer"""
+    ubx_count = 0
+    nmea_count = 0
+    ubr = UBXReader(io.BytesIO(raw_data),
+                    protfilter=UBX_PROTOCOL | NMEA_PROTOCOL,
+                    quitonerror=0)  # skip junk instead of raising
+    while True:
+        try:
+            raw_msg, parsed_msg = ubr.read()
+        except Exception:
+            break
+        if raw_msg is None:
+            break
+        if parsed_msg is None:
+            continue
+        if raw_msg[:2] == b'\xb5\x62':
+            ubx_count += 1
+        elif raw_msg[:1] == b'$':
+            nmea_count += 1
+    return ubx_count, nmea_count
 
 
 def parse_and_display_data(baud, raw_data):
@@ -137,10 +158,12 @@ def main():
     
     for baud in BAUD_RATES_TO_TEST:
         success, ubx_count, nmea_count, data = test_baud_rate(GPS_PORT, baud)
-        
-        if success:
+
+        if success and (ubx_count + nmea_count) > 0:
             print(f"✓ {baud:6d} baud: WORKING ({ubx_count} UBX, {nmea_count} NMEA messages)")
-            working_bauds.append((baud, data))
+            working_bauds.append((baud, data, ubx_count + nmea_count))
+        elif success:
+            print(f"✗ {baud:6d} baud: data received but no valid messages (noise — wrong rate)")
         else:
             print(f"✗ {baud:6d} baud: No response")
     
@@ -159,37 +182,20 @@ def main():
     # Phase 2: Parse and display data from each working baud rate
     print("\n--- Phase 2: Parsing data from working baud rates ---\n")
     
-    for baud, data in working_bauds:
+    for baud, data, _ in working_bauds:
         parse_and_display_data(baud, data)
-    
-    # Recommend the best baud rate
+
+    # Recommend the rate that produced the most valid messages
+    # (tiebreak: higher baud)
     print("\n" + "=" * 60)
     print("RECOMMENDATION")
     print("=" * 60)
-    
-    # Prefer higher baud rates for better performance
-    preferred_order = [115200, 230400, 57600, 38400, 19200, 9600]
-    recommended = None
-    
-    for preferred in preferred_order:
-        for baud, _ in working_bauds:
-            if baud == preferred:
-                recommended = baud
-                break
-        if recommended:
-            break
-    
-    if recommended:
-        print(f"✓ Recommended baud rate: {recommended}")
-        print(f"\nTo use this baud rate in gps_logger.py:")
-        print(f"  BAUDRATE = {recommended}")
-        
-        if recommended == 38400:
-            print(f"\nNote: 38400 is the current default in gps_logger.py")
-        else:
-            print(f"\nNote: You may need to reconfigure the module to use {recommended} baud")
-            print(f"      Run: uv run --with pyserial baud_rate_configure.py")
-    
+
+    recommended = max(working_bauds, key=lambda w: (w[2], w[0]))[0]
+    print(f"✓ Recommended baud rate: {recommended}")
+    print(f"\nTo use this baud rate in gps_logger.py:")
+    print(f"  uv run gps_logger.py --baud {recommended}")
+
     return 0
 
 

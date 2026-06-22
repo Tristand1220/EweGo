@@ -494,8 +494,7 @@ def _apply_elapsed_xaxis(ax, span_s: float):
 def make_camera_figure(utc1, bright1, utc2, bright2, params, session_label):
     fig = plt.figure(figsize=(16, 11))
     fig.suptitle(
-        #f"Camera Sync Analysis  ·  Session: {session_label}",
-        f"Camera Sync Analysis  ·  Session: 5 minute Sawtooth",
+        f"Camera Sync Analysis  ·  Session: {session_label}",
         fontsize=13, fontweight="bold", y=0.98, color="#eeeeee",
     )
     gs = gridspec.GridSpec(

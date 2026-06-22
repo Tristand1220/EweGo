@@ -7,8 +7,18 @@ one period, then instantly resets — a classic forward sawtooth:
 
     B(t) = 255 * ((t * freq) % 1.0)
 
-Simultaneously plays a sawtooth audio tone at a configurable pitch frequency
-so that microphone capture can be analysed in the same way as camera capture.
+Simultaneously plays an audio tone (carrier pitch = --audio-freq) whose
+AMPLITUDE is modulated by the exact same sawtooth envelope driving the
+screen brightness:
+
+    envelope(t) = (t * freq) % 1.0          <- same as the visual signal
+    A(t)        = volume * envelope(t) * sin(2*pi*audio_freq*t)
+
+This means the microphone's RMS envelope over time should trace the same
+sawtooth ramp shape as the camera's ROI brightness — making the two
+directly comparable on one set of axes. The carrier frequency is just
+a "container" for the envelope; it does not itself need to match
+anything visual.
 
 On start, writes sawtooth_params.json into --output-dir so that
 analyze_sync.py can reconstruct the exact ground-truth waveforms.
@@ -18,7 +28,7 @@ Usage:
 
 Options:
     --freq FLOAT        Visual sawtooth frequency in Hz      (default: 1.0)
-    --audio-freq FLOAT  Audio sawtooth pitch in Hz           (default: 440.0)
+    --audio-freq FLOAT  Audio carrier pitch in Hz            (default: 440.0)
     --duration INT      Stop after N seconds  (0 = run until Q/ESC/Ctrl+C)
     --output-dir PATH   Directory for sawtooth_params.json   (default: .)
     --display INT       pygame display index                  (default: 0)
@@ -105,30 +115,49 @@ def visual_sawtooth(elapsed: float, freq: float) -> float:
     return 255.0 * math.fmod(elapsed * freq, 1.0)
 
 
-def build_audio_sawtooth_chunk(phase: float, audio_freq: float,
-                               sr: int, n_frames: int,
-                               volume: float) -> tuple[np.ndarray, float]:
+def build_audio_chunk(start_elapsed: float, visual_freq: float,
+                      audio_freq: float, sr: int, n_frames: int,
+                      volume: float) -> np.ndarray:
     """
-    Generate one chunk of a sawtooth audio waveform as int16 samples.
-    Returns (samples_int16, next_phase).
+    Generate one chunk of audio whose AMPLITUDE follows the same sawtooth
+    envelope as the visual signal, carried on a fixed-pitch tone.
 
-    Sawtooth: amplitude ramps linearly from -1 to +1 over one audio period,
-    then wraps. Phase is tracked continuously so chunks stitch seamlessly.
+        envelope(t) = (t * visual_freq) % 1.0        (0.0 -> 1.0 ramp, same
+                                                        as the screen brightness)
+        carrier(t)  = sin(2*pi*audio_freq*t)          (fixed audible pitch)
+        A(t)        = volume * envelope(t) * carrier(t)
+
+    Args:
+        start_elapsed: elapsed seconds (since recording start) at the first
+                       sample of this chunk. Using absolute elapsed time
+                       (rather than a running carrier phase) means the
+                       envelope is always computed from true wall-clock
+                       position — no per-chunk phase bookkeeping needed,
+                       and the envelope can never drift relative to the
+                       visual signal even over a long recording.
+        visual_freq:   frequency of the sawtooth envelope (Hz) — pass the
+                       SAME value used for the visual brightness so audio
+                       and video stay locked to one ground truth.
+        audio_freq:    carrier pitch in Hz (what you actually hear as "pitch")
+        sr:            sample rate
+        n_frames:      number of samples to generate
+        volume:        peak volume 0.0-1.0
+
+    Returns:
+        int16 numpy array of length n_frames
     """
-    # Phase increment per sample
-    phase_inc = audio_freq / sr
+    # Per-sample elapsed time for this chunk
+    t = start_elapsed + np.arange(n_frames) / sr
 
-    # Phase array for this chunk
-    phases = (phase + np.arange(n_frames) * phase_inc) % 1.0
+    # Envelope: identical sawtooth shape to the visual signal, 0.0 -> 1.0
+    envelope = np.mod(t * visual_freq, 1.0)
 
-    # Sawtooth: map phase [0,1) -> amplitude [-1, +1)
-    samples_f = (phases * 2.0 - 1.0) * volume
+    # Carrier: fixed-pitch tone, used purely so there's something to hear/RMS
+    carrier = np.sin(2.0 * math.pi * audio_freq * t)
 
-    # Convert to int16
+    samples_f   = envelope * carrier * volume
     samples_i16 = (samples_f * 32767).astype(np.int16)
-
-    next_phase = (phase + n_frames * phase_inc) % 1.0
-    return samples_i16, next_phase
+    return samples_i16
 
 
 # ---------------------------------------------------------------------------
@@ -148,19 +177,27 @@ def write_params(output_dir: Path, freq: float, audio_freq: float,
             "formula":       "B(t) = 255 * ((elapsed_s * freq_hz) % 1.0)",
         },
         "audio": {
-            "waveform":      "sawtooth_forward",
-            "freq_hz":       audio_freq,
+            "modulation":    "amplitude",
+            "envelope_waveform": "sawtooth_forward",
+            "envelope_freq_hz":  freq,   # SAME as visual freq_hz — shared envelope
+            "carrier_freq_hz":   audio_freq,
             "sample_rate":   AUDIO_SR,
             "channels":      AUDIO_CHANNELS,
             "volume":        volume,
-            "formula":       "A(t) = volume * (2 * ((elapsed_s * freq_hz) % 1.0) - 1)",
+            "formula": (
+                "envelope(t) = (elapsed_s * envelope_freq_hz) % 1.0;  "
+                "A(t) = volume * envelope(t) * sin(2*pi*carrier_freq_hz*elapsed_s)"
+            ),
         },
         "start_utc":      start_utc.isoformat(),
         "start_mono_us":  start_mono_us,
         "notes": (
             "elapsed_s = wall_seconds_since_start_utc. "
-            "Visual and audio sawtooth share start_utc as t=0. "
-            "Audio formula gives amplitude in [-volume, +volume]."
+            "The audio envelope is IDENTICAL in shape and frequency to the "
+            "visual sawtooth (both use freq_hz), so RMS(audio) and "
+            "brightness(video) should trace the same normalized ramp curve. "
+            "carrier_freq_hz is only the audible pitch and carries no "
+            "timing information."
         ),
     }
     path = output_dir / "sawtooth_params.json"
@@ -191,7 +228,7 @@ class HUD:
             f"V-Freq    : {freq:.4f} Hz  ({1/freq:.2f} s/cycle)",
             f"V-Phase   : {phase_pct:5.1f} %",
             f"Brightness: {brightness:5.1f} / 255",
-            f"A-Freq    : {audio_freq:.1f} Hz" + ("" if audio_on else "  [OFF]"),
+            f"A-Carrier: {audio_freq:.1f} Hz" + ("" if audio_on else "  [OFF]"),
             f"Frame     : {frame:6d}",
             f"Render    : {fps:5.1f} fps",
         ]
@@ -214,56 +251,50 @@ class HUD:
 
 class SawtoothAudioStream:
     """
-    Streams a seamless sawtooth tone using pygame's Sound object queue.
-    Generates chunks slightly ahead of playback to avoid gaps.
+    Streams a seamless amplitude-modulated tone using pygame's Sound queue.
+    The envelope tracks ABSOLUTE elapsed time since stream start, so it can
+    never drift out of sync with the visual sawtooth even over a long
+    recording — each chunk is computed fresh from wall-clock position
+    rather than accumulated phase.
     """
 
     PREBUFFER_CHUNKS = 4   # chunks to pre-generate before playback starts
 
-    def __init__(self, audio_freq: float, volume: float, sr: int = AUDIO_SR,
-                 chunk_frames: int = CHUNK_FRAMES):
-        self.audio_freq   = audio_freq
-        self.volume       = volume
-        self.sr           = sr
-        self.chunk_frames = chunk_frames
-        self.phase        = 0.0
-        self._stop        = threading.Event()
-        self._channel     = None
+    def __init__(self, visual_freq: float, audio_freq: float, volume: float,
+                sr: int = AUDIO_SR, chunk_frames: int = CHUNK_FRAMES):
+        self.visual_freq  = visual_freq   # envelope frequency (shared w/ video)
+        self.audio_freq   = audio_freq    # carrier pitch (audible tone only)
+        self.volume        = volume
+        self.sr            = sr
+        self.chunk_frames  = chunk_frames
+        self._next_elapsed = 0.0          # elapsed seconds at next chunk's first sample
+        self._stop         = threading.Event()
+        self._channel       = None
 
-    def _make_sound(self) -> tuple[pygame.mixer.Sound, float]:
-        samples, next_phase = build_audio_sawtooth_chunk(
-            self.phase, self.audio_freq, self.sr,
-            self.chunk_frames, self.volume,
+    def _make_sound(self) -> pygame.mixer.Sound:
+        samples = build_audio_chunk(
+            self._next_elapsed, self.visual_freq, self.audio_freq,
+            self.sr, self.chunk_frames, self.volume,
         )
-        # pygame mixer expects 2D array for mono: shape (N, 1)  or (N,2) stereo
-        # We initialised mixer as stereo (required by some drivers), so duplicate
+        self._next_elapsed += self.chunk_frames / self.sr
+        # pygame mixer expects 2D array; duplicate mono -> stereo
         stereo = np.column_stack([samples, samples])
-        sound  = pygame.sndarray.make_sound(stereo)
-        return sound, next_phase
+        return pygame.sndarray.make_sound(stereo)
 
     def start(self):
         self._channel = pygame.mixer.find_channel(force=True)
-        # Pre-fill buffer
-        sounds = []
-        for _ in range(self.PREBUFFER_CHUNKS):
-            s, self.phase = self._make_sound()
-            sounds.append(s)
-        # Queue them all
+        sounds = [self._make_sound() for _ in range(self.PREBUFFER_CHUNKS)]
         self._channel.play(sounds[0])
         for s in sounds[1:]:
             self._channel.queue(s)
-        # Background thread keeps the queue topped up
         t = threading.Thread(target=self._feeder, daemon=True)
         t.start()
 
     def _feeder(self):
         """Keep one chunk queued ahead at all times."""
         while not self._stop.is_set():
-            # Only queue a new chunk when the channel has finished the current
-            # and needs the next one (get_queue returns None when slot is free)
             if self._channel and self._channel.get_queue() is None:
-                s, self.phase = self._make_sound()
-                self._channel.queue(s)
+                self._channel.queue(self._make_sound())
             time.sleep(self.chunk_frames / self.sr / 2)
 
     def stop(self):
@@ -333,6 +364,7 @@ def run(args):
     audio_stream = None
     if audio_ok:
         audio_stream = SawtoothAudioStream(
+            visual_freq=args.freq,
             audio_freq=args.audio_freq,
             volume=args.volume,
             sr=AUDIO_SR,
