@@ -397,25 +397,34 @@ def load_audio_sidecar(session_dir: Path,
 
 def load_audio_timestamps_csv(audio_path: Path,
                               start_utc_s: float,
-                              start_mono_us: int) -> "tuple[np.ndarray, np.ndarray] | None":
+                              start_mono_us: int,
+                              blocksize: int = 1024,
+                              samplerate: int = 48000,
+                              ) -> "tuple[np.ndarray, np.ndarray] | None":
     """
-    Load the per-block timestamp CSV written by the sounddevice recorder.
+    Load the per-block timestamp CSV written by record_audio.py.
 
-    The recorder writes <audio_stem>.timestamps.csv alongside the WAV with
-    columns:  monotonic_us, sample_index
+    Handles two CSV formats:
 
-    Each row is one audio callback block.  monotonic_us is time.monotonic_ns()//1000
-    captured inside the callback — much more precise than the sidecar t0 since
-    it timestamps each block individually rather than just the recording start.
+      NEW (3 columns) — record_audio.py using PortAudio inputBufferAdcTime:
+        monotonic_us, sample_index, adc_time_s
+        monotonic_us here is already corrected to ADC capture time of the
+        block's first sample.  No further adjustment needed.
 
-    Converts monotonic_us → UTC using the same anchor pair already loaded
-    from start_time.txt / start_mono_us.txt so audio and camera timestamps
-    share the exact same time base.
+      OLD (2 columns) — previous recorder using time.monotonic_ns() inside
+        the callback:
+        monotonic_us, sample_index
+        These timestamps are biased late by ~blocksize/samplerate seconds
+        (the callback fires AFTER the block is captured, not when the first
+        sample arrived).  We subtract one block duration to correct this.
 
-    Returns (utc_times, sample_indices) as float64 / int64 arrays,
-    or None if no CSV is found.
+    In both cases, monotonic_us is converted to UTC via the shared anchor
+    (start_time.txt / start_mono_us.txt) so audio and camera share one
+    time base.
     """
     import csv as _csv
+
+    BLOCK_DUR_US = int(blocksize / samplerate * 1_000_000)  # ~21333 µs at 1024/48k
 
     candidates = [
         audio_path.with_suffix(".timestamps.csv"),
@@ -424,11 +433,16 @@ def load_audio_timestamps_csv(audio_path: Path,
     for path in candidates:
         if not path.exists():
             continue
-        mono_us_list   = []
+
+        mono_us_list    = []
         sample_idx_list = []
+        new_format      = False
+
         try:
             with open(path, newline="") as f:
                 reader = _csv.DictReader(f)
+                # Detect format from header
+                new_format = "adc_time_s" in (reader.fieldnames or [])
                 for row in reader:
                     mono_us_list.append(int(row["monotonic_us"]))
                     sample_idx_list.append(int(row["sample_index"]))
@@ -436,13 +450,23 @@ def load_audio_timestamps_csv(audio_path: Path,
             print(f"  [WARN] Could not parse audio timestamps CSV {path}: {e}")
             return None
 
-        mono_us_arr = np.array(mono_us_list,   dtype=np.int64)
+        mono_us_arr = np.array(mono_us_list,    dtype=np.int64)
         sample_arr  = np.array(sample_idx_list, dtype=np.int64)
-        utc_arr     = mono_us_to_utc(mono_us_arr, start_utc_s, start_mono_us)
 
-        print(f"[analyze_sync] Audio timestamps CSV loaded from {path}")
+        if new_format:
+            # ADC capture time — already correct, no adjustment
+            print(f"[analyze_sync] Audio CSV (NEW format — ADC timestamps): {path}")
+        else:
+            # Old format: callback-delivery time, biased late by one block.
+            # Subtract block duration to approximate true ADC capture time.
+            mono_us_arr = mono_us_arr - BLOCK_DUR_US
+            print(f"[analyze_sync] Audio CSV (OLD format — callback timestamps, "
+                  f"corrected -{BLOCK_DUR_US/1000:.1f} ms per block): {path}")
+
+        utc_arr = mono_us_to_utc(mono_us_arr, start_utc_s, start_mono_us)
+
         print(f"  {len(utc_arr)} blocks  "
-              f"first_utc={utc_arr[0]:.3f}  last_utc={utc_arr[-1]:.3f}")
+              f"first_utc={utc_arr[0]:.6f}  last_utc={utc_arr[-1]:.6f}")
         return utc_arr, sample_arr
 
     return None
@@ -1529,6 +1553,7 @@ def main():
             # --- Load per-block audio timestamps from CSV (preferred) -------
             audio_block_result = load_audio_timestamps_csv(
                 audio_path, start_utc_s, start_mono_us,
+                blocksize=1024, samplerate=audio_sr,
             )
             if audio_block_result is not None:
                 audio_block_utc, audio_block_samples = audio_block_result

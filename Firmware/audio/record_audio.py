@@ -31,7 +31,9 @@ def record_audio(filename=None, duration=None, device=None, t0_sidecar=None):
 
     def callback(indata, frames, time_info, status):
         mono_us = time.monotonic_ns() // 1000
-        audio_q.put((indata.copy(), mono_us))
+        # Trying to increase input volume
+        # indata *= 2
+        audio_q.put((indata.copy(), mono_us)) 
 
     stream_kwargs = dict(
         samplerate=RATE,
